@@ -32,6 +32,7 @@ export default {
     embedding_tok: "llama_embedding_notes",
     lm_head_notes: "llama_lm_head_notes",
     causal_analogy_notes: "gqa_notes",
+    final_ln_notes: "llama_final_norm_notes",
   },
   fileNames: new Map([
     [llamaTrainingCode, "train_llama.py"],

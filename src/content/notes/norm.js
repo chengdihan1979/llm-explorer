@@ -1582,7 +1582,7 @@ x = x + self.attn(self.ln1(x))     # ln1 = RMSNorm(n_embd)
 x = x + self.mlp(self.ln2(x))      # ln2 = RMSNorm(n_embd)
 \`\`\`
 
-This is pre-norm (explained in the [LayerNorm](#info:layernorm) note): the norm is applied only to the **copy** of $x$ that goes into attention or the MLP, and the update is added back to the un-normalized $x$. So the residual stream itself is never normalized inside the 32 blocks; it only keeps getting added to. That is why there is one more norm at the end, \`ln_f\`, right before the LM head (see [final norm](#info:final_ln_notes)).
+This is pre-norm (explained in the [LayerNorm](#info:layernorm) note): the norm is applied only to the **copy** of $x$ that goes into attention or the MLP, and the update is added back to the un-normalized $x$. So the residual stream itself is never normalized inside the 32 blocks; it only keeps getting added to. That is why there is one more norm at the end, \`ln_f\`, right before the LM head (see [final RMSNorm](#info:llama_final_norm_notes)).
 
 \`\`\`text
 each block:  ln1 (before attention), ln2 (before the MLP)    32 × 2 = 64
@@ -1746,7 +1746,7 @@ x = x + self.attn(self.ln1(x))     # ln1 = RMSNorm(n_embd)
 x = x + self.mlp(self.ln2(x))      # ln2 = RMSNorm(n_embd)
 \`\`\`
 
-这就是 pre-norm（[LayerNorm](#info:layernorm) note 里讲过）：norm 只作用在送进 attention 或 MLP 的那份 $x$ 的**副本**上，算出的更新量再加回**没有归一化的** $x$。所以在 32 个 block 里，residual stream 本身从来没有被归一化过，只是不断被加上新的东西。这也是为什么最后还要再加一个 norm \`ln_f\`，放在 LM head 之前（见[最后的 norm](#info:final_ln_notes)）。
+这就是 pre-norm（[LayerNorm](#info:layernorm) note 里讲过）：norm 只作用在送进 attention 或 MLP 的那份 $x$ 的**副本**上，算出的更新量再加回**没有归一化的** $x$。所以在 32 个 block 里，residual stream 本身从来没有被归一化过，只是不断被加上新的东西。这也是为什么最后还要再加一个 norm \`ln_f\`，放在 LM head 之前（见[最后的 RMSNorm](#info:llama_final_norm_notes)）。
 
 \`\`\`text
 每个 block：ln1（attention 前）、ln2（MLP 前）   32 × 2 = 64 个
@@ -1855,6 +1855,127 @@ RMSNorm 的论文（Zhang & Sennrich, 2019）提出：**LayerNorm 真正起作�
 2. **Layer Normalization.** Ba、Kiros & Hinton，2016。[arXiv:1607.06450 ↗](https://arxiv.org/abs/1607.06450)
 3. **Gemma 2: Improving Open Language Models at a Practical Size.** Gemma Team，Google DeepMind，2024。[arXiv:2408.00118 ↗](https://arxiv.org/abs/2408.00118)
 4. **2 OLMo 2 Furious.** OLMo Team，Ai2，2024。[arXiv:2501.00656 ↗](https://arxiv.org/abs/2501.00656)
+`,
+    },
+  },
+
+  llama_final_norm_notes: {
+    en: {
+      title: "Final RMSNorm (ln_f)",
+      md: `
+**After the 32 blocks and before the LM head, LLaMA normalizes the residual stream once more, with an [RMSNorm](#info:rmsnorm_notes). It does the same job as GPT-2's [final LayerNorm](#info:final_ln_notes), but keeps the vector's direction.**
+
+## Where it sits
+
+\`\`\`python
+for blk in self.blocks:      # 32 blocks
+    x = blk(x)
+x = self.ln_f(x)             # ← final RMSNorm
+logits = self.lm_head(x)
+\`\`\`
+
+## Why it is needed
+
+LLaMA is pre-norm, like GPT-2. The two RMSNorms in each block normalize only the **copy** of the stream that goes into attention or the MLP. The residual stream $x$ itself is never normalized inside the 32 blocks: it just keeps receiving 64 updates (32 from attention, 32 from the MLP). So its length differs from token to token and can get large.
+
+The LM head computes each logit as a dot product with $x$, and a dot product grows in proportion to the length of $x$. Without a final norm, how confident the model is would depend on how long $x$ happens to be. The [GPT-2 note](#info:final_ln_notes) explains this in more detail.
+
+## Worked example
+
+The same small example as in the GPT-2 note: 4 dimensions, 3 words. Token B points in the same direction as token A but is 8 times longer. RMSNorm with $\\gamma = 1$, $\\epsilon$ ignored:
+
+\`\`\`text
+           x                    RMS     x / RMS
+token A:   [1, -0.5, 1.5, 0]    0.935   [1.069, -0.535, 1.604, 0]
+token B:   [8, -4,   12,  0]    7.483   [1.069, -0.535, 1.604, 0]
+\`\`\`
+
+For token A: $\\text{RMS} = \\sqrt{(1 + 0.25 + 2.25 + 0)/4} = \\sqrt{0.875} \\approx 0.935$, then each number is divided by 0.935.
+
+After the norm the two tokens are identical, so their logits are too. Each logit is the dot product with one word's vector:
+
+\`\`\`text
+word 0 = [ 0.5, 0,   0.5, 0  ]
+word 1 = [ 0,   0.5, 0,   0.5]
+word 2 = [-0.5, 0,   0.5, 0  ]
+\`\`\`
+
+\`\`\`text
+logits  = [1.336, -0.267, 0.267]
+softmax = [0.65,   0.13,  0.22 ]
+\`\`\`
+
+Without the norm, token B's logits would be 8 times token A's, and B would be almost 100% sure of word 0.
+
+## The difference from GPT-2's ln_f
+
+- **LayerNorm** subtracts the mean first, which changes the direction. Token A becomes $[0.632, -1.265, 1.265, -0.632]$, which does not point the same way as $[1, -0.5, 1.5, 0]$.
+- **RMSNorm** only divides by the RMS, so the direction stays the same and only the length is fixed: $[1.069, -0.535, 1.604, 0]$ is the original vector divided by 0.935.
+
+After that, each dimension is multiplied by its own learned $\\gamma$ (\`self.weight\`). There is no bias.
+
+## Parameters
+
+One $\\gamma$ of 4096 numbers. Next to the 8B parameters of the model, it is negligible.
+`,
+    },
+    zh: {
+      title: "最后的 RMSNorm（ln_f）",
+      md: `
+**32 个 block 跑完之后、进 LM head 之前，LLaMA 会用一个 [RMSNorm](#info:rmsnorm_notes) 再把残差流归一化一次。它的作用和 GPT-2 的[最后一个 LayerNorm](#info:final_ln_notes) 一样，区别是不改变向量的方向。**
+
+## 在哪里
+
+\`\`\`python
+for blk in self.blocks:      # 32 个 block
+    x = blk(x)
+x = self.ln_f(x)             # ← 最后的 RMSNorm
+logits = self.lm_head(x)
+\`\`\`
+
+## 为什么需要它
+
+LLaMA 和 GPT-2 一样是 pre-norm。每个 block 里的两个 RMSNorm，只归一化送进 attention 和 MLP 的那份**副本**。残差流 $x$ 本身在 32 个 block 里从没被归一化过，只是不断被加上 64 次更新（32 次来自 attention，32 次来自 MLP）。所以它的长度因 token 而异，还可能变得很大。
+
+LM head 算每个 logit 用的是和 $x$ 的点积，点积和 $x$ 的长度成正比。如果最后不归一化，模型有多自信，就会被 $x$ 碰巧有多长左右。更详细的解释见 [GPT-2 的那篇 note](#info:final_ln_notes)。
+
+## 例子
+
+还是 GPT-2 note 里那个小例子：4 维，3 个词。token B 和 token A 方向相同，长度是 A 的 8 倍。用 RMSNorm 归一化（$\\gamma = 1$，忽略 $\\epsilon$）：
+
+\`\`\`text
+           x                    RMS     x / RMS
+token A:   [1, -0.5, 1.5, 0]    0.935   [1.069, -0.535, 1.604, 0]
+token B:   [8, -4,   12,  0]    7.483   [1.069, -0.535, 1.604, 0]
+\`\`\`
+
+以 token A 为例：$\\text{RMS} = \\sqrt{(1 + 0.25 + 2.25 + 0)/4} = \\sqrt{0.875} \\approx 0.935$，再把每个数除以 0.935。
+
+归一化之后两个 token 完全一样，logits 也就一样。每个 logit 是和一个词向量的点积，词向量是：
+
+\`\`\`text
+word 0 = [ 0.5, 0,   0.5, 0  ]
+word 1 = [ 0,   0.5, 0,   0.5]
+word 2 = [-0.5, 0,   0.5, 0  ]
+\`\`\`
+
+\`\`\`text
+logits  = [1.336, -0.267, 0.267]
+softmax = [0.65,   0.13,  0.22 ]
+\`\`\`
+
+如果不归一化，B 的 logits 是 A 的 8 倍，B 会几乎 100% 确定是 word 0。
+
+## 和 GPT-2 的 ln_f 有什么不同
+
+- **LayerNorm** 会先减去均值，向量的方向会变。token A 会变成 $[0.632, -1.265, 1.265, -0.632]$，和原来的 $[1, -0.5, 1.5, 0]$ 方向不一样。
+- **RMSNorm** 只除以 RMS，方向不变，只是把长度统一成固定大小：$[1.069, -0.535, 1.604, 0]$ 就是原向量除以 0.935。
+
+之后每个维度再乘上自己学到的 $\\gamma$（\`self.weight\`），没有 bias。
+
+## 参数
+
+只有一个 4096 维的 $\\gamma$，和整个模型的 8B 参数比起来可以忽略。
 `,
     },
   },

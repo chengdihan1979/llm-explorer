@@ -1882,9 +1882,59 @@ $\\sigma(z)$ is the [sigmoid](#hover:sigmoid_notes), between 0 and 1, so SiLU le
 - **GLU** (gated linear unit): the general structure, one projection passed through an activation and multiplied by another projection. The original GLU used sigmoid as the gate's activation.
 - **SwiGLU** = a GLU whose gate uses Swish, another name for [SiLU](#info:silu_notes).
 
-## 6. Sizes in LLaMA 3 8B
+## 6. Why the hidden size is 14336
 
-The hidden size is 14336, which is $14336 / 4096 = 3.5$ times \`n_embd\`, not 4 times as in GPT-2. Each of the three matrices is $4096 \\times 14336 \\approx 58.7\\text{M}$ parameters, so one MLP has about 176M, and none of them have biases.
+LLaMA 3 8B's MLP hidden size is 14336, which is $14336 / 4096 = 3.5$ times \`n_embd\`, not 4 times as in GPT-2. It comes from two steps.
+
+### Step 1: match the parameters of a plain MLP
+
+A plain MLP has 2 matrices, with hidden size $4d$ ($d$ = \`n_embd\`):
+
+$$
+\\text{parameters} = 2 \\times d \\times 4d = 8d^2
+$$
+
+SwiGLU has 3 matrices (gate, up, down). With hidden size $4d$ it would have $12d^2$ parameters, half as many again. For a fair comparison, the SwiGLU paper shrinks the hidden size to $\\frac{2}{3}$ of $4d$:
+
+$$
+3 \\times d \\times h = 8d^2 \\quad\\Rightarrow\\quad h = \\tfrac{8}{3} d \\approx 2.67 d
+$$
+
+For $d = 4096$:
+
+\`\`\`text
+plain MLP, hidden 16384:   2 × 4096 × 16384 = 134.2M
+SwiGLU,    hidden 10922:   3 × 4096 × 10922 = 134.2M
+\`\`\`
+
+Same number of parameters, and SwiGLU works better. LLaMA 1 7B did exactly this, rounding 10922 up to a multiple of 256: **11008**.
+
+### Step 2: LLaMA 3 scales it up by 1.3
+
+Meta's LLaMA code computes the hidden size like this:
+
+\`\`\`python
+hidden_dim = 4 * dim                               # 16384
+hidden_dim = int(2 * hidden_dim / 3)               # 10922
+hidden_dim = int(ffn_dim_multiplier * hidden_dim)  # × 1.3 -> 14198
+# round up to a multiple of 1024 -> 14336
+hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+\`\`\`
+
+LLaMA 3 8B sets \`ffn_dim_multiplier = 1.3\` and \`multiple_of = 1024\`, so the result is $14336 = 14 \\times 1024$, which is 3.5 times 4096.
+
+Rounding to a multiple of 1024 keeps the matrix shapes GPU-friendly: GPUs multiply matrices in fixed-size tiles, and sizes that are multiples of large powers of 2 fill the tiles exactly.
+
+### What this means
+
+Each of the three matrices is $4096 \\times 14336 \\approx 58.7\\text{M}$ parameters, none with biases:
+
+| | per-layer MLP | 32 layers |
+| --- | --- | --- |
+| parameter-matched (hidden 10922) | 134M | 4.3B |
+| LLaMA 3 (hidden 14336) | 176M | 5.6B |
+
+About 5.6B of LLaMA 3 8B's 8B parameters are in the MLPs, the largest share. The MLPs are about 30% bigger than the parameter-matched version: part of the parameter budget is deliberately spent on the MLP.
 
 ## References
 
@@ -1970,9 +2020,59 @@ $\\sigma(z)$ 是 [sigmoid](#hover:sigmoid_notes)，取值在 0 到 1 之间。�
 - **GLU**（gated linear unit，门控线性单元）：泛指这种结构，一个投影过激活函数后，去乘另一个投影。最早的 GLU 用 sigmoid 当门的激活函数。
 - **SwiGLU** 就是门用 Swish 的 GLU。Swish 是 [SiLU](#info:silu_notes) 的另一个名字。
 
-## 6. LLaMA 3 8B 里的尺寸
+## 6. hidden size 为什么是 14336
 
-hidden size 是 14336，是 \`n_embd\` 的 $14336 / 4096 = 3.5$ 倍，不是 GPT-2 的 4 倍。三个矩阵每个都是 $4096 \\times 14336 \\approx 58.7\\text{M}$ 个参数，一个 MLP 合计约 176M，而且都没有 bias。
+LLaMA 3 8B 的 MLP hidden size 是 14336，是 \`n_embd\` 的 $14336 / 4096 = 3.5$ 倍，不是 GPT-2 的 4 倍。这个数是分两步得来的。
+
+### 第 1 步：先和普通 MLP 的参数量对齐
+
+普通 MLP 有 2 个矩阵，hidden 是 $4d$（$d$ 就是 \`n_embd\`）：
+
+$$
+\\text{参数} = 2 \\times d \\times 4d = 8d^2
+$$
+
+SwiGLU 有 3 个矩阵（gate、up、down）。如果 hidden 还是 $4d$，参数就是 $12d^2$，多了一半。为了公平比较，SwiGLU 论文把 hidden 缩成 $4d$ 的 $\\frac{2}{3}$：
+
+$$
+3 \\times d \\times h = 8d^2 \\quad\\Rightarrow\\quad h = \\tfrac{8}{3} d \\approx 2.67 d
+$$
+
+$d = 4096$ 时：
+
+\`\`\`text
+普通 MLP，hidden 16384：   2 × 4096 × 16384 = 134.2M
+SwiGLU，  hidden 10922：   3 × 4096 × 10922 = 134.2M
+\`\`\`
+
+参数一样多，SwiGLU 效果更好。LLaMA 1 7B 就是这么做的：10922 向上取整到 256 的倍数，得到 **11008**。
+
+### 第 2 步：LLaMA 3 再放大 1.3 倍
+
+Meta 的 LLaMA 代码是这样算 hidden size 的：
+
+\`\`\`python
+hidden_dim = 4 * dim                               # 16384
+hidden_dim = int(2 * hidden_dim / 3)               # 10922
+hidden_dim = int(ffn_dim_multiplier * hidden_dim)  # × 1.3 -> 14198
+# 向上取整到 1024 的倍数 -> 14336
+hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+\`\`\`
+
+LLaMA 3 8B 设的是 \`ffn_dim_multiplier = 1.3\`、\`multiple_of = 1024\`，所以结果是 $14336 = 14 \\times 1024$，正好是 4096 的 3.5 倍。
+
+取整到 1024 的倍数，是为了让矩阵尺寸对 GPU 友好：GPU 按固定大小的块做矩阵乘法，尺寸是 2 的大次幂的倍数时，块能刚好填满。
+
+### 这意味着什么
+
+三个矩阵每个都是 $4096 \\times 14336 \\approx 58.7\\text{M}$ 个参数，都没有 bias：
+
+| | 每层 MLP | 32 层合计 |
+| --- | --- | --- |
+| 参数对齐（hidden 10922） | 134M | 4.3B |
+| LLaMA 3（hidden 14336） | 176M | 5.6B |
+
+LLaMA 3 8B 的 8B 参数里，约 5.6B 在 MLP 里，占了大头。MLP 比参数对齐的版本大了约 30%，也就是有意把一部分参数预算花在了 MLP 上。
 
 ## 参考资料
 
