@@ -3495,4 +3495,211 @@ decode 的每一步，GPU 都要从显存里把所有权重和整个 KV cache �
 `,
     },
   },
+
+  sliding_window_notes: {
+    en: {
+      title: "Sliding-window attention",
+      md: `
+**🆕 In sliding-window attention, each token attends only to the last $W$ tokens (itself included), not to every earlier token. Mistral 7B uses $W = 4096$. Beyond that length, the attention cost per token and the [KV cache](#info:kv_cache_notes) stop growing, and stacking layers still lets information travel much further than $W$.**
+
+## 1. The mask
+
+With the ordinary [causal mask](#info:causal_mask_notes) (GPT-2, LLaMA), token $i$ sees tokens $0, 1, \\dots, i$. With a sliding window it sees only tokens $i - W + 1, \\dots, i$.
+
+A small example with 6 tokens and $W = 3$ (row = query token, column = key token, 1 = may attend):
+
+\`\`\`text
+          key:  0  1  2  3  4  5
+query 0:        1  0  0  0  0  0
+query 1:        1  1  0  0  0  0
+query 2:        1  1  1  0  0  0
+query 3:        0  1  1  1  0  0
+query 4:        0  0  1  1  1  0
+query 5:        0  0  0  1  1  1
+\`\`\`
+
+The first $W$ rows are the same as the causal mask. After that, the band of 1s slides one step to the right on each row, and every row has exactly $W$ ones.
+
+In the code, only the mask changes:
+
+\`\`\`python
+i = torch.arange(T)
+dist = i[:, None] - i[None, :]                 # (T, T): query position - key position
+mask = (dist >= 0) & (dist < self.window)      # causal, and within the window
+att = att.masked_fill(mask == 0, float('-inf'))
+\`\`\`
+
+\`dist >= 0\` is the causal part (no looking ahead); \`dist < self.window\` drops keys that are $W$ or more positions back.
+
+## 2. What it saves
+
+**Compute.** Each query is scored against at most $W$ keys instead of $i + 1$. Counting the scores per head per layer:
+
+\`\`\`text
+sequence length    causal         window W = 4096    ratio
+ 4,096             8.4M           8.4M               100%
+ 8,192            33.6M          25.2M                75%
+16,384           134.2M          58.7M                44%
+32,768           536.9M         125.8M                23%
+\`\`\`
+
+Up to $W$ tokens nothing changes. Past that, causal attention grows with the square of the length, the window only linearly.
+
+**Memory.** A token never looks more than $W - 1$ positions back, so the KV cache only needs the last $W$ tokens. For Mistral 7B one token takes 128 KB (the same shape as [LLaMA 3 8B with GQA](#info:gqa_notes)), so the cache is capped at
+
+$$
+4096 \\times 128\\ \\text{KB} = 512\\ \\text{MB}
+$$
+
+per sequence, however long the text. Without the window, 32K tokens would need 4 GB.
+
+## 3. The rolling buffer cache
+
+Mistral stores the cache in a fixed array of $W$ slots and writes token $i$ to slot $i \\bmod W$. With $W = 4$:
+
+\`\`\`text
+token:  0  1  2  3  4  5  6
+slot:   0  1  2  3  0  1  2
+\`\`\`
+
+Token 4 overwrites slot 0, which held token 0. That is exactly the token that just left the window: token 4 sees tokens 1 to 4.
+
+The slots are no longer in position order (slot 0 now holds token 4), but that does not matter:
+
+- Each $k$ was rotated by [RoPE](#info:rope_notes) at its own position **before** it was stored, so its position is already inside it.
+- Attention takes a weighted sum over the keys. Reordering the keys, together with their values, gives the same result.
+
+## 4. Information still travels beyond $W$
+
+In layer 1, token $i$ sees tokens $i - W + 1$ to $i$. But in layer 2, each of those tokens' inputs already contains what **they** saw in layer 1, which reaches another $W - 1$ positions back. Every layer extends the reach by $W - 1$.
+
+The same example with $W = 3$, following token 7:
+
+\`\`\`text
+after 1 layer:   token 7 has seen tokens 5-7
+after 2 layers:  tokens 3-7
+after 3 layers:  tokens 1-7
+\`\`\`
+
+For Mistral 7B, 32 layers with $W = 4096$ reach $32 \\times 4095 = 131{,}040$ tokens, the "theoretical attention span of about 131K" in the paper.
+
+This reach is indirect. A token far back can only influence the output through the tokens in between, layer by layer, which is much weaker than attending to it directly. So the window saves compute and memory, but recall over long distances is worse than with full attention.
+
+## 5. 🆕 Where the idea went
+
+- **Earlier:** [GPT-3](#info:gpt3_notes) alternated full attention with locally banded attention, from the Sparse Transformer. Longformer (2020) combined a sliding window with a few global tokens.
+- **Mistral itself:** Mistral 7B v0.2 (2024) dropped the window and used full attention over a 32K context, with RoPE base $10^6$.
+- **Local and global layers:** Gemma 2 alternates sliding-window layers (window 4096) with full-attention layers one to one. Gemma 3 uses five local layers (window 1024) per global layer. Only the global layers need a full-length KV cache.
+
+## References
+
+1. **Mistral 7B (2023).** Jiang et al. Sliding-window attention and the rolling buffer cache. [Mistral 7B ↗](https://arxiv.org/abs/2310.06825)
+2. **Generating Long Sequences with Sparse Transformers (2019).** Child et al. [Sparse Transformer ↗](https://arxiv.org/abs/1904.10509)
+3. **Longformer: The Long-Document Transformer (2020).** Beltagy et al. [Longformer ↗](https://arxiv.org/abs/2004.05150)
+4. **Gemma 2 (2024)** and **Gemma 3 (2025).** Local and global attention layers. [Gemma 2 ↗](https://arxiv.org/abs/2408.00118) · [Gemma 3 ↗](https://arxiv.org/abs/2503.19786)
+`,
+    },
+    zh: {
+      title: "滑动窗口注意力",
+      md: `
+**🆕 滑动窗口注意力（sliding-window attention）里，每个 token 只看最近的 $W$ 个 token（包括自己），而不是前面所有 token。Mistral 7B 用的是 $W = 4096$。文本超过这个长度以后，每个 token 的 attention 计算量和 [KV cache](#info:kv_cache_notes) 都不再增长；层层叠起来，信息仍然能传到比 $W$ 远得多的地方。**
+
+## 1. mask 长什么样
+
+普通的 [causal mask](#info:causal_mask_notes)（GPT-2、LLaMA）里，token $i$ 能看到 token $0, 1, \\dots, i$。加了滑动窗口，它只能看到 token $i - W + 1, \\dots, i$。
+
+用 6 个 token、$W = 3$ 举例（行是 query token，列是 key token，1 表示可以看）：
+
+\`\`\`text
+          key:  0  1  2  3  4  5
+query 0:        1  0  0  0  0  0
+query 1:        1  1  0  0  0  0
+query 2:        1  1  1  0  0  0
+query 3:        0  1  1  1  0  0
+query 4:        0  0  1  1  1  0
+query 5:        0  0  0  1  1  1
+\`\`\`
+
+前 $W$ 行和 causal mask 一模一样。从那以后，每往下一行，那条 1 组成的带子就往右挪一格，每行都正好有 $W$ 个 1。
+
+代码里只有 mask 变了：
+
+\`\`\`python
+i = torch.arange(T)
+dist = i[:, None] - i[None, :]                 # (T, T)：query 位置 - key 位置
+mask = (dist >= 0) & (dist < self.window)      # 因果，且在窗口内
+att = att.masked_fill(mask == 0, float('-inf'))
+\`\`\`
+
+\`dist >= 0\` 是因果那部分（不能往后看）；\`dist < self.window\` 把往前 $W$ 个位置及更远的 key 去掉。
+
+## 2. 省了什么
+
+**计算。** 每个 query 最多只和 $W$ 个 key 算分数，而不是 $i + 1$ 个。数一数每个 head、每一层要算多少个分数：
+
+\`\`\`text
+序列长度          causal         窗口 W = 4096      比例
+ 4,096            8.4M           8.4M               100%
+ 8,192           33.6M          25.2M                75%
+16,384          134.2M          58.7M                44%
+32,768          536.9M         125.8M                23%
+\`\`\`
+
+不超过 $W$ 时完全一样。超过以后，causal attention 随长度的平方增长，滑动窗口只是线性增长。
+
+**内存。** 一个 token 最多往前看 $W - 1$ 个位置，所以 KV cache 只需要留最近的 $W$ 个 token。Mistral 7B 每个 token 占 128 KB（和[用 GQA 的 LLaMA 3 8B](#info:gqa_notes) 一样），所以缓存最多是
+
+$$
+4096 \\times 128\\ \\text{KB} = 512\\ \\text{MB}
+$$
+
+每条序列都是这么多，不管文本有多长。不加窗口的话，32K 个 token 要 4 GB。
+
+## 3. 循环缓冲区（rolling buffer）
+
+Mistral 把缓存放在一个固定的、有 $W$ 个槽位的数组里，token $i$ 写进第 $i \\bmod W$ 个槽。以 $W = 4$ 为例：
+
+\`\`\`text
+token：  0  1  2  3  4  5  6
+槽位：   0  1  2  3  0  1  2
+\`\`\`
+
+token 4 覆盖了槽 0，原来存的是 token 0，而它正好是刚刚移出窗口的那个：token 4 只看 token 1 到 4。
+
+这样一来，槽里的顺序就不再按位置排了（槽 0 现在放的是 token 4），但这没关系：
+
+- 每个 $k$ 在存进去**之前**，已经按自己的位置用 [RoPE](#info:rope_notes) 转过了，位置信息已经在它里面。
+- attention 是对所有 key 加权求和。把 key 连同它们的 value 一起换个顺序，结果完全一样。
+
+## 4. 信息仍然能传到 $W$ 之外
+
+第 1 层里，token $i$ 看的是 token $i - W + 1$ 到 $i$。但到了第 2 层，这些 token 的输入里已经带着**它们**在第 1 层看到的东西，又往前延伸了 $W - 1$ 个位置。每多一层，能触及的范围就再远 $W - 1$。
+
+还是 $W = 3$ 的例子，看 token 7：
+
+\`\`\`text
+1 层之后：token 7 已经"看过" token 5-7
+2 层之后：token 3-7
+3 层之后：token 1-7
+\`\`\`
+
+Mistral 7B 有 32 层，$W = 4096$，能触及 $32 \\times 4095 = 131{,}040$ 个 token，也就是论文里说的"理论注意力范围约 131K"。
+
+不过这种触及是间接的。很远的 token 只能一层一层地经过中间的 token 才能影响输出，远不如直接看到它。所以滑动窗口省了计算和内存，但长距离的信息找回能力比不上完整的 attention。
+
+## 5. 🆕 后来的发展
+
+- **更早的做法**：[GPT-3](#info:gpt3_notes) 让完整 attention 和局部带状 attention 交替使用，来自 Sparse Transformer。Longformer（2020）把滑动窗口和少量全局 token 结合起来。
+- **Mistral 自己**：Mistral 7B v0.2（2024）去掉了滑动窗口，改成在 32K 上下文上做完整 attention，RoPE base 改成 $10^6$。
+- **局部层和全局层搭配**：Gemma 2 让滑动窗口层（窗口 4096）和完整 attention 层一比一交替。Gemma 3 是每 5 个局部层（窗口 1024）配 1 个全局层。只有全局层需要完整长度的 KV cache。
+
+## 参考资料
+
+1. **Mistral 7B (2023).** Jiang 等人。滑动窗口注意力和循环缓冲区。[Mistral 7B ↗](https://arxiv.org/abs/2310.06825)
+2. **Generating Long Sequences with Sparse Transformers (2019).** Child 等人。[Sparse Transformer ↗](https://arxiv.org/abs/1904.10509)
+3. **Longformer: The Long-Document Transformer (2020).** Beltagy 等人。[Longformer ↗](https://arxiv.org/abs/2004.05150)
+4. **Gemma 2 (2024)** 和 **Gemma 3 (2025).** 局部层和全局层的搭配。[Gemma 2 ↗](https://arxiv.org/abs/2408.00118) · [Gemma 3 ↗](https://arxiv.org/abs/2503.19786)
+`,
+    },
+  },
 };

@@ -475,4 +475,85 @@ loss = F.cross_entropy((B*T, V), (B*T))
 `,
     },
   },
+
+  mistral_notes: {
+    en: {
+      title: "Mistral 7B",
+      md: `
+**🆕 Mistral 7B (Mistral AI, September 2023) has almost the same architecture as LLaMA. Its main new idea is [sliding-window attention](#info:sliding_window_notes): each token attends only to the last 4096 tokens. With 7.24B parameters, the paper reports it beating LLaMA 2 13B on every benchmark tested.**
+
+## Side by side
+
+Mistral 7B came out between LLaMA 2 and LLaMA 3:
+
+| | LLaMA 2 7B | Mistral 7B | LLaMA 3 8B |
+|---|---|---|---|
+| released | Jul 2023 | Sep 2023 | Apr 2024 |
+| blocks × width | 32 × 4096 | 32 × 4096 | 32 × 4096 |
+| query / key-value heads | 32 / 32 | 32 / 8 | 32 / 8 |
+| MLP hidden size | 11008 | 14336 | 14336 |
+| vocabulary | 32,000 | 32,000 | 128,256 |
+| RoPE base | 10,000 | 10,000 | 500,000 |
+| attention | full | sliding window, $W = 4096$ | full |
+| context | 4K | 8K | 8K |
+| parameters | 6.7B | 7.24B | 8.03B |
+
+Compared with LLaMA 2 7B, Mistral 7B added [grouped-query attention](#info:gqa_notes), a wider [SwiGLU MLP](#info:swiglu_notes) and the sliding window. LLaMA 3 8B later has the same head counts and MLP size.
+
+## What differs from LLaMA 3 8B
+
+This site's Mistral page is drawn from the LLaMA 3 8B page, so these are the differences you will see in the code:
+
+1. **Sliding-window attention.** Only the attention mask changes. See [sliding-window attention](#info:sliding_window_notes).
+2. **A smaller vocabulary: 32,000 tokens**, a SentencePiece BPE tokenizer like LLaMA 2's (LLaMA 3: 128,256). The token embedding and the LM head shrink from 525M to 131M parameters each. That accounts for almost all of the gap between 8.03B and 7.24B: $2 \\times (128256 - 32000) \\times 4096 \\approx 0.79$B.
+3. **RoPE base 10,000**, the original value (LLaMA 3: 500,000; see [RoPE](#info:rope_notes)).
+
+Everything else is the same: RMSNorm, RoPE, GQA with 8 key/value heads, SwiGLU with hidden size 14336, no biases, and an LM head with its own weights.
+
+## References
+
+1. **Mistral 7B (2023).** Jiang et al. [Mistral 7B ↗](https://arxiv.org/abs/2310.06825)
+2. **Llama 2: Open Foundation and Fine-Tuned Chat Models (2023).** Touvron et al. [Llama 2 ↗](https://arxiv.org/abs/2307.09288)
+`,
+    },
+    zh: {
+      title: "Mistral 7B",
+      md: `
+**🆕 Mistral 7B（Mistral AI，2023 年 9 月）的架构和 LLaMA 几乎一样，主要的新东西是[滑动窗口注意力](#info:sliding_window_notes)：每个 token 只看最近的 4096 个 token。它只有 72.4 亿参数，论文里在所有测试项目上都超过了 LLaMA 2 13B。**
+
+## 放在一起比
+
+Mistral 7B 发布于 LLaMA 2 和 LLaMA 3 之间：
+
+| | LLaMA 2 7B | Mistral 7B | LLaMA 3 8B |
+|---|---|---|---|
+| 发布时间 | 2023 年 7 月 | 2023 年 9 月 | 2024 年 4 月 |
+| block 数 × 宽度 | 32 × 4096 | 32 × 4096 | 32 × 4096 |
+| query / key-value head 数 | 32 / 32 | 32 / 8 | 32 / 8 |
+| MLP hidden size | 11008 | 14336 | 14336 |
+| 词表 | 32,000 | 32,000 | 128,256 |
+| RoPE base | 10,000 | 10,000 | 500,000 |
+| attention | 完整 | 滑动窗口，$W = 4096$ | 完整 |
+| 上下文 | 4K | 8K | 8K |
+| 参数 | 67 亿 | 72.4 亿 | 80.3 亿 |
+
+和 LLaMA 2 7B 比，Mistral 7B 加了[分组查询注意力](#info:gqa_notes)、更宽的 [SwiGLU MLP](#info:swiglu_notes) 和滑动窗口。后来的 LLaMA 3 8B 用的是同样的 head 数和 MLP 尺寸。
+
+## 和 LLaMA 3 8B 有什么不同
+
+本站的 Mistral 页面是在 LLaMA 3 8B 页面的基础上画的，代码里能看到的区别只有这几处：
+
+1. **滑动窗口注意力。** 只有 attention 的 mask 变了，详见[滑动窗口注意力](#info:sliding_window_notes)。
+2. **词表小得多：32,000 个 token**，和 LLaMA 2 一样用 SentencePiece 的 BPE tokenizer（LLaMA 3 是 128,256）。token embedding 和 LM head 各自从 5.25 亿参数缩到 1.31 亿。8.03B 和 7.24B 之间的差距几乎全在这里：$2 \\times (128256 - 32000) \\times 4096 \\approx 0.79$B。
+3. **RoPE base 是 10,000**，也就是最初的取值（LLaMA 3 是 500,000，见 [RoPE](#info:rope_notes)）。
+
+其余全都一样：RMSNorm、RoPE、8 个 key/value head 的 GQA、hidden size 14336 的 SwiGLU、没有 bias、LM head 有自己的权重。
+
+## 参考资料
+
+1. **Mistral 7B (2023).** Jiang 等人。[Mistral 7B ↗](https://arxiv.org/abs/2310.06825)
+2. **Llama 2: Open Foundation and Fine-Tuned Chat Models (2023).** Touvron 等人。[Llama 2 ↗](https://arxiv.org/abs/2307.09288)
+`,
+    },
+  },
 };

@@ -29,6 +29,7 @@ const BLURB = {
   gpt2: { en: "The reference point: 124M parameters, learned positions, LayerNorm, GELU.", zh: "参照点：1.24 亿参数，学出来的位置向量，LayerNorm，GELU。" },
   gpt3: { en: "GPT-2's design at 175B parameters, with alternating sparse attention.", zh: "GPT-2 的设计放大到 1750 亿参数，并交替使用稀疏 attention。" },
   llama: { en: "LLaMA 3 8B: RMSNorm, RoPE, grouped-query attention, SwiGLU.", zh: "LLaMA 3 8B：RMSNorm、RoPE、分组查询注意力、SwiGLU。" },
+  mistral: { en: "Mistral 7B: LLaMA's design with sliding-window attention and a rolling KV cache.", zh: "Mistral 7B：LLaMA 的设计，加上滑动窗口注意力和循环使用的 KV cache。" },
 };
 
 // The landing page: the architecture-evolution animation, then links to each model page.

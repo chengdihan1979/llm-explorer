@@ -210,6 +210,10 @@ export function buildCodeHtml({ component, selectedId, noteOverrides = {} }) {
 
   // LLaMA: tokenizer
   html = html.replace(/AutoTokenizer\.from_pretrained\("meta-llama\/Meta-Llama-3-8B"\)/g, (m) => `<span data-action="open:llama_tokenizer_notes" style="text-decoration: underline; cursor: pointer;">${m}</span>`);
+  // Mistral: tokenizer and model class open the Mistral overview; the window opens the sliding-window note
+  html = html.replace(/AutoTokenizer\.from_pretrained\("mistralai\/Mistral-7B-v0\.1"\)/g, (m) => `<span data-action="open:mistral_notes" style="text-decoration: underline; cursor: pointer;">${m}</span>`);
+  html = html.replace(/class\s+(Mistral)(?=\()/g, 'class <span data-action="open:mistral_notes" style="text-decoration: underline; cursor: pointer;">$1</span>');
+  html = html.replace(/self\.window(?= = window)|\(dist &lt; self\.window\)/g, (m) => `<span data-action="open:sliding_window_notes" style="text-decoration: underline; cursor: pointer;">${m}</span>`);
   // LLaMA: rotary position embedding
   html = html.replace(/\b(apply_rope|rope_cache)\b/g, (m) => `<span data-action="open:rope_notes" style="text-decoration: underline; cursor: pointer;">${m}</span>`);
   // LLaMA's grouped-query attention: the K/V head count and the head repeat.
