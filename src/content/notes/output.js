@@ -104,7 +104,7 @@ logits:  (B, T, 50304)      # 每个位置，对每个词都有一个分数
 
   llama_lm_head_notes: {
     en: {
-      title: "LLaMA LM head: not tied to the embedding",
+      title: "LLaMA LM head: untied, with a large vocabulary",
       md: `
 **LLaMA's LM head does the same job as [GPT-2's](#info:lm_head_notes): it takes the dot product of the final vector with one row per token, which gives every token a score. The difference is that its weight matrix is its own, not shared with the [token embedding](#info:llama_embedding_notes).**
 
@@ -127,7 +127,7 @@ The LM head's weight and the embedding table have the same shape, $(V, C) = (128
 Row $i$ has a different job in each matrix:
 
 - **Token embedding:** what token $i$ means when it is read as **context**, for the tokens after it to use.
-- **LM head:** it **scores** token $i$: the dot product of the final vector with this row is token $i
+- **LM head:** it **scores** token $i$: the dot product of the final vector with this row is token $i$'s score. So this row has to learn what the final vector looks like when the next token should be $i$.
 
 The two jobs are related (tokens with similar meanings tend to follow similar contexts), but they are not the same. Tying forces one vector to do both; untying lets each end learn the vector that suits its own job. (The [weight tying](#info:weight_tying_notes) note shows how a tied row gets gradients from both ends.)
 
@@ -155,46 +155,57 @@ The LM head's softmax has an output for every token, so **every row of the LM he
 
 Without tying, none of that reaches the embedding table. An embedding row gets a gradient only when its token appears in the input batch. So for a rare token, the output row is trained every step, but the input row only now and then (see [LLaMA token embedding](#info:llama_embedding_notes)).
 
+## 🆕 A large vocabulary: the logits get big
+
+LLaMA 3's vocabulary has 128256 tokens, about 2.5 times GPT-2's 50257. The LM head gives every token a score at every position:
+
+\`\`\`python
+logits = self.lm_head(x)    # (B, T, 4096) -> (B, T, 128256)
+\`\`\`
+
+### How big the logits are
+
+In training, the loss is computed at every position, so the whole $(B, T, V)$ logits tensor is computed and kept for the backward pass. For **one** sequence of 8K tokens:
+
+\`\`\`text
+8192 × 128256 numbers
+  fp32 (4 bytes each):  4.2 GB
+  bf16 (2 bytes each):  2.1 GB
+\`\`\`
+
+The intermediate results of softmax and cross-entropy, and the gradient in the backward pass, have the same shape. For comparison, GPT-2 with 1024 positions: $1024 \\times 50257 \\times 4$ bytes $\\approx$ 206 MB, 20 times smaller.
+
+So in a large-vocabulary model like LLaMA 3, the logits are often the **largest single block of activation memory** in training.
+
+### How much compute it takes
+
+Per token, the LM head does $2 \\times 4096 \\times 128256 \\approx 1.05$ GFLOP. The whole model does about $2 \\times 8\\text{B} = 16$ GFLOP per token, so the LM head is about 6.5%. The problem is memory, not compute.
+
+### How newer training code avoids it
+
+- **Compute the loss in chunks:** instead of producing all $(T, V)$ logits at once, compute the logits and the loss for one chunk of positions at a time, keep only the loss, and throw the chunk's logits away.
+- **Fused kernels:** do the LM head's matrix multiply, the softmax and the cross-entropy in one GPU kernel, so the big tensor is never written to GPU memory. Examples: the fused linear cross-entropy in Liger Kernel, and Cut Cross-Entropy (Apple, 2024).
+
+### Inference is much lighter
+
+When generating, only the next token is needed, so only the last position's logits are computed:
+
+\`\`\`python
+logits = self.lm_head(x[:, -1, :])    # (B, 4096) -> (B, 128256)
+\`\`\`
+
+That is just 128256 numbers per sequence.
+
 ## References
 
 1. **Using the Output Embedding to Improve Language Models.** Press & Wolf, 2016. [arXiv:1608.05859 ↗](https://arxiv.org/abs/1608.05859)
 2. **The Llama 3 Herd of Models.** Llama Team, Meta, 2024. [arXiv:2407.21783 ↗](https://arxiv.org/abs/2407.21783)
-s score. So this row has to learn what the final vector looks like when the next token should be $i$.
-
-The two jobs are related (tokens with similar meanings tend to follow similar contexts), but they are not the same. Tying forces one vector to do both; untying lets each end learn the vector that suits its own job. (The [weight tying](#info:weight_tying_notes) note shows how a tied row gets gradients from both ends.)
-
-## Why GPT-2 tied: what the saving is worth
-
-Tying removes one $V \\times C$ matrix. How much that saves depends on the size of the rest of the model:
-
-| Model | Tied? | One $V \\times C$ matrix | Saved by tying |
-|---|---|---|---|
-| GPT-2 small | yes | 38.6M | 24% (124M instead of 163M) |
-| LLaMA 3.2 1B | yes | 263M | 18% (1.24B instead of 1.50B) |
-| LLaMA 3.2 3B | yes | 394M | 11% (3.2B instead of 3.6B) |
-| LLaMA 3 8B | no | 525M | would be 6.5% (7.5B instead of 8.0B) |
-
-Each percentage is one matrix divided by the parameter count without tying, e.g. 38.6M / 163M ≈ 24%.
-
-- **Small models:** the embedding is a large part of the model, so tying saves up to a quarter of the parameters. GPT-2 ties, and so do LLaMA 3.2 1B and 3B, the small models meant to run on phones and other devices.
-- **Large models:** almost all the parameters are in the transformer blocks (about 7.0B of LLaMA 3 8B's 8.0B). Saving 6.5% is not worth making both ends share one vector, so LLaMA 1, 2 and 3 at 7B/8B and above do not tie.
-
-Other model families make the same choice by size; see "Recent developments" in the [weight tying](#info:weight_tying_notes) note.
-
-## A side effect on the gradients
-
-The LM head's softmax has an output for every token, so **every row of the LM head** gets a gradient at every step, as in GPT-2.
-
-Without tying, none of that reaches the embedding table. An embedding row gets a gradient only when its token appears in the input batch. So for a rare token, the output row is trained every step, but the input row only now and then (see [LLaMA token embedding](#info:llama_embedding_notes)).
-
-## References
-
-1. **Using the Output Embedding to Improve Language Models.** Press & Wolf, 2016. [arXiv:1608.05859 ↗](https://arxiv.org/abs/1608.05859)
-2. **The Llama 3 Herd of Models.** Llama Team, Meta, 2024. [arXiv:2407.21783 ↗](https://arxiv.org/abs/2407.21783)
+3. **Liger Kernel: Efficient Triton Kernels for LLM Training.** Hsu et al., LinkedIn, 2024. [arXiv:2410.10989 ↗](https://arxiv.org/abs/2410.10989)
+4. **Cut Your Losses in Large-Vocabulary Language Models.** Wijmans et al., Apple, 2024. [arXiv:2411.09009 ↗](https://arxiv.org/abs/2411.09009)
 `,
     },
     zh: {
-      title: "LLaMA 的 LM head：不和 embedding 共享权重",
+      title: "LLaMA 的 LM head：不共享权重，词表很大",
       md: `
 **LLaMA 的 LM head 做的事和 [GPT-2 的](#info:lm_head_notes)一样：用最后的向量和每个 token 的一行做点积，给每个 token 一个分数。区别是它的权重矩阵是自己的，不和 [token embedding](#info:llama_embedding_notes) 共享。**
 
@@ -245,10 +256,53 @@ LM head 的 softmax 对每个 token 都有输出，所以 **LM head 的每一行
 
 不共享时，这些梯度都不会传到 embedding 表。embedding 的一行只有在它的 token 出现在这个 batch 的输入里时才有梯度。所以对一个很少出现的 token，输出端那一行每一步都在训练，输入端那一行却只是偶尔被训练（见 [LLaMA 的 token embedding](#info:llama_embedding_notes)）。
 
+## 🆕 词表大了以后：logits 变得很大
+
+LLaMA 3 的词表有 128256 个 token，差不多是 GPT-2（50257）的 2.5 倍。LM head 要在每个位置给每个 token 打分：
+
+\`\`\`python
+logits = self.lm_head(x)    # (B, T, 4096) -> (B, T, 128256)
+\`\`\`
+
+### logits 有多大
+
+训练时每个位置都要算 loss，所以整个 $(B, T, V)$ 的 logits 都要算出来，还要存着留给反向传播。光是**一条** 8K token 的序列：
+
+\`\`\`text
+8192 × 128256 个数
+  fp32（每个 4 字节）：4.2 GB
+  bf16（每个 2 字节）：2.1 GB
+\`\`\`
+
+softmax、cross-entropy 的中间结果，以及反向传播时的梯度，形状也都一样大。对比一下，GPT-2 的 1024 个位置：$1024 \\times 50257 \\times 4$ 字节 $\\approx$ 206 MB，小了 20 倍。
+
+所以像 LLaMA 3 这样的大词表模型，logits 往往是训练时**最大的一块激活内存**。
+
+### 算力上占多少
+
+LM head 每个 token 的计算量是 $2 \\times 4096 \\times 128256 \\approx 1.05$ GFLOP。整个模型每个 token 大约 $2 \\times 8\\text{B} = 16$ GFLOP，LM head 只占约 6.5%。问题出在内存上，不在算力上。
+
+### 后来的训练代码怎么避开
+
+- **分块算 loss**：不一次性算出整个 $(T, V)$ 的 logits，而是每次只取一段位置，算出这段的 logits 和 loss，留下 loss，把这段 logits 扔掉，再算下一段。
+- **融合 kernel**：把 LM head 的矩阵乘、softmax 和 cross-entropy 放进同一个 GPU kernel 里算，那个大张量根本不写进显存。比如 Liger Kernel 里的 fused linear cross-entropy，以及 Apple 2024 年的 Cut Cross-Entropy。
+
+### inference 时轻得多
+
+生成时只需要预测下一个 token，所以只算最后一个位置的 logits：
+
+\`\`\`python
+logits = self.lm_head(x[:, -1, :])    # (B, 4096) -> (B, 128256)
+\`\`\`
+
+每条序列只有 128256 个数。
+
 ## 参考资料
 
 1. **Using the Output Embedding to Improve Language Models.** Press & Wolf，2016。[arXiv:1608.05859 ↗](https://arxiv.org/abs/1608.05859)
 2. **The Llama 3 Herd of Models.** Llama Team，Meta，2024。[arXiv:2407.21783 ↗](https://arxiv.org/abs/2407.21783)
+3. **Liger Kernel: Efficient Triton Kernels for LLM Training.** Hsu 等人，LinkedIn，2024。[arXiv:2410.10989 ↗](https://arxiv.org/abs/2410.10989)
+4. **Cut Your Losses in Large-Vocabulary Language Models.** Wijmans 等人，Apple，2024。[arXiv:2411.09009 ↗](https://arxiv.org/abs/2411.09009)
 `,
     },
   },
