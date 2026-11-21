@@ -214,6 +214,8 @@ export function buildCodeHtml({ component, selectedId, noteOverrides = {} }) {
   html = html.replace(/\b(apply_rope|rope_cache)\b/g, (m) => `<span data-action="open:rope_notes" style="text-decoration: underline; cursor: pointer;">${m}</span>`);
   // LLaMA's grouped-query attention: the K/V head count and the head repeat.
   html = html.replace(/\b(repeat_interleave|GQA)\b/g, (m) => `<span data-action="open:gqa_notes" style="text-decoration: underline; cursor: pointer;">${m}</span>`);
+  // LLaMA's SwiGLU gate activation.
+  html = html.replace(/F\.silu/g, (m) => `<span data-action="open:silu_notes" style="text-decoration: underline; cursor: pointer;">${m}</span>`);
   // LLaMA's SwiGLU MLP: the name.
   html = html.replace(/\bSwiGLU\b/g, (m) => `<span data-action="open:swiglu_notes" style="text-decoration: underline; cursor: pointer;">${m}</span>`);
   // LLaMA's block: CausalSelfAttention(...) and MLP(...) jump to their code.

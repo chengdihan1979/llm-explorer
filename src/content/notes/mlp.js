@@ -1869,13 +1869,20 @@ So each gate number acts like a valve: it decides how much of the matching \`up\
 
 **The difference from GPT-2.** In GPT-2, GELU decides from a number how much of **that same number** to keep. In SwiGLU, the decision "how much to let through" (the gate) and the content "what to let through" (\`up\`) come from two separate projections, so the model can learn them independently.
 
-## 4. The name
+## 4. SiLU, the gate's activation
+
+$$
+\\text{SiLU}(z) = z \\cdot \\sigma(z)
+$$
+
+$\\sigma(z)$ is the [sigmoid](#hover:sigmoid_notes), between 0 and 1, so SiLU lets large values through almost unchanged and pushes very negative values to almost 0. That is what makes the gate work like a valve. Its curve is very close to GELU's. [More on SiLU](#info:silu_notes).
+
+## 5. The name
 
 - **GLU** (gated linear unit): the general structure, one projection passed through an activation and multiplied by another projection. The original GLU used sigmoid as the gate's activation.
-- **Swish**: the activation $\\text{Swish}(z) = z \\cdot \\sigma(z)$, where $\\sigma$ is the sigmoid. PyTorch calls it SiLU (\`F.silu\`). Its curve is very close to GELU.
-- **SwiGLU** = a GLU whose gate uses Swish.
+- **SwiGLU** = a GLU whose gate uses Swish, another name for [SiLU](#info:silu_notes).
 
-## 5. Sizes in LLaMA 3 8B
+## 6. Sizes in LLaMA 3 8B
 
 The hidden size is 14336, which is $14336 / 4096 = 3.5$ times \`n_embd\`, not 4 times as in GPT-2. Each of the three matrices is $4096 \\times 14336 \\approx 58.7\\text{M}$ parameters, so one MLP has about 176M, and none of them have biases.
 
@@ -1950,13 +1957,20 @@ gate * up       = [-0.1439,  0.0,   2.1932, 1.4289]
 
 **和 GPT-2 的区别。** GPT-2 里，GELU 是看一个数本身，来决定**这个数自己**留多少。SwiGLU 里，"放多少"（gate）和"放什么"（\`up\`）来自两个不同的投影，模型可以分开学这两件事。
 
-## 4. 名字的由来
+## 4. 门用的激活函数 SiLU
+
+$$
+\\text{SiLU}(z) = z \\cdot \\sigma(z)
+$$
+
+$\\sigma(z)$ 是 [sigmoid](#hover:sigmoid_notes)，取值在 0 到 1 之间。所以 SiLU 让大的值基本原样通过，把很负的值压到接近 0，门能像阀门一样工作靠的就是这一点。它的曲线和 GELU 非常接近。[详见 SiLU](#info:silu_notes)。
+
+## 5. 名字的由来
 
 - **GLU**（gated linear unit，门控线性单元）：泛指这种结构，一个投影过激活函数后，去乘另一个投影。最早的 GLU 用 sigmoid 当门的激活函数。
-- **Swish**：激活函数 $\\text{Swish}(z) = z \\cdot \\sigma(z)$，$\\sigma$ 是 sigmoid。PyTorch 里叫 SiLU（\`F.silu\`），曲线和 GELU 非常接近。
-- **SwiGLU** 就是门用 Swish 的 GLU。
+- **SwiGLU** 就是门用 Swish 的 GLU。Swish 是 [SiLU](#info:silu_notes) 的另一个名字。
 
-## 5. LLaMA 3 8B 里的尺寸
+## 6. LLaMA 3 8B 里的尺寸
 
 hidden size 是 14336，是 \`n_embd\` 的 $14336 / 4096 = 3.5$ 倍，不是 GPT-2 的 4 倍。三个矩阵每个都是 $4096 \\times 14336 \\approx 58.7\\text{M}$ 个参数，一个 MLP 合计约 176M，而且都没有 bias。
 
@@ -1965,6 +1979,212 @@ hidden size 是 14336，是 \`n_embd\` 的 $14336 / 4096 = 3.5$ 倍，不是 GPT
 1. **Language Modeling with Gated Convolutional Networks (2016).** Dauphin 等人提出门控线性单元（GLU）。[GLU ↗](https://arxiv.org/abs/1612.08083)
 2. **GLU Variants Improve Transformer (2020).** Shazeer 在 Transformer 的 MLP 里试了多种 GLU 变体，SwiGLU 是效果最好的几种之一。[GLU Variants ↗](https://arxiv.org/abs/2002.05202)
 3. **LLaMA: Open and Efficient Foundation Language Models (2023).** LLaMA 采用了 SwiGLU，LLaMA 2 和 3 也沿用了下来。[LLaMA ↗](https://arxiv.org/abs/2302.13971)
+`,
+    },
+  },
+
+  silu_notes: {
+    en: {
+      title: "SiLU (Swish)",
+      md: `
+**🆕 SiLU is the activation function in the gate of LLaMA's [SwiGLU](#info:swiglu_notes) MLP. It multiplies its input by the sigmoid of that input: large values pass almost unchanged, very negative values are pushed to almost 0. Its curve is very close to GELU's.**
+
+## 1. Definition
+
+$$
+\\text{SiLU}(z) = z \\cdot \\sigma(z)
+$$
+
+$\\sigma(z)$ is the [sigmoid](#hover:sigmoid_notes), a number between 0 and 1. So SiLU multiplies $z$ by a fraction between 0 and 1, and the fraction depends on $z$ itself:
+
+- **Large $z$:** $\\sigma(z) \\approx 1$, so $\\text{SiLU}(z) \\approx z$. The value passes almost unchanged.
+- **Very negative $z$:** $\\sigma(z) \\approx 0$, so $\\text{SiLU}(z) \\approx 0$. The value is almost blocked.
+- **$z = 0$:** $\\sigma(0) = 0.5$, so $\\text{SiLU}(0) = 0$.
+
+![SiLU curve from −3.5 to 3.5 with the line y = z for comparison](/llm-explorer/notes/silu.svg)
+
+## 2. Values
+
+Some values, computed exactly, with [GELU](#info:gelu) (exact form) for comparison:
+
+\`\`\`text
+z          -6       -3       -1       0      1       3       6
+sigmoid    0.0025   0.0474   0.2689   0.5    0.7311  0.9526  0.9975
+SiLU      -0.0148  -0.1423  -0.2689   0      0.7311  2.8577  5.9852
+GELU      -0.0000  -0.0040  -0.1587   0      0.8413  2.9960  6.0000
+\`\`\`
+
+## 3. Compared with GELU
+
+GELU is $z$ times the standard normal CDF $\\Phi(z)$; SiLU is $z$ times $\\sigma(z)$. Both fractions rise smoothly from 0 to 1, so the two curves look almost the same:
+
+![SiLU and GELU from −6 to 1.5: SiLU dips deeper and further left, and returns to 0 more slowly](/llm-explorer/notes/silu_vs_gelu.svg)
+
+- For positive $z$ both are close to $z$.
+- For negative $z$ both dip slightly below 0 and then return to 0. SiLU's dip is deeper and wider: its minimum is about $-0.28$ at $z \\approx -1.28$, GELU's is about $-0.17$ at $z \\approx -0.75$. At $z = -3$, SiLU is still $-0.14$ while GELU is already $-0.004$.
+
+## 4. The names: Swish and SiLU
+
+- **SiLU** (sigmoid linear unit): $z \\cdot \\sigma(z)$. The GELU paper (2016) already mentions it under this name. PyTorch uses this name: \`F.silu\`.
+- **Swish**: $z \\cdot \\sigma(\\beta z)$, found by an automated search over activation functions (Google Brain, 2017). With $\\beta = 1$ it is exactly SiLU.
+
+Both names refer to the same function in LLaMA. The "Swi" in SwiGLU comes from Swish.
+
+### How Swish was found
+
+Swish was not designed by hand. Ramachandran, Zoph and Le let a program try a very large number of candidate functions and keep the best:
+
+1. **Building blocks.** One-input operations such as $z$, $-z$, $|z|$, $z^2$, $e^z$, $\\sin z$, $\\sigma(z)$, $\\tanh z$, $\\max(z, 0)$, and two-input operations such as add, multiply, max, min. A candidate is a combination of these, for example $z \\cdot \\sigma(z)$ or $\\max(z, \\sin z)$. Thousands of candidates are possible.
+2. **Proposing candidates.** When the space was small, every combination was tried. When it was large, an RNN wrote candidate functions, and was trained with reinforcement learning to propose better ones over time.
+3. **Scoring.** Each candidate was used as the activation function of a small network (ResNet-20), trained on the CIFAR-10 image classification dataset. Its accuracy was the score, which was fed back to the RNN.
+4. **Checking the winner.** Among the top candidates, $z \\cdot \\sigma(\\beta z)$ was the most consistent. The authors named it Swish and tested it on larger tasks (ImageNet classification, machine translation), where it matched or beat ReLU, the most common activation at the time.
+
+So SiLU is the older name for the function, and Swish is the name under which the search rediscovered it and made it popular.
+
+## References
+
+1. **Gaussian Error Linear Units (GELUs) (2016).** Hendrycks and Gimpel introduce GELU and also discuss SiLU. [GELU ↗](https://arxiv.org/abs/1606.08415)
+2. **Searching for Activation Functions (2017).** Ramachandran, Zoph and Le find Swish by automated search. [Swish ↗](https://arxiv.org/abs/1710.05941)
+`,
+    },
+    zh: {
+      title: "SiLU（Swish）",
+      md: `
+**🆕 SiLU 是 LLaMA 的 [SwiGLU](#info:swiglu_notes) MLP 里门用的激活函数。它拿输入乘上输入自己的 sigmoid：大的值基本原样通过，很负的值被压到接近 0。它的曲线和 GELU 非常接近。**
+
+## 1. 定义
+
+$$
+\\text{SiLU}(z) = z \\cdot \\sigma(z)
+$$
+
+$\\sigma(z)$ 是 [sigmoid](#hover:sigmoid_notes)，取值在 0 到 1 之间。所以 SiLU 就是拿 $z$ 乘上一个 0 到 1 之间的比例，而这个比例由 $z$ 自己决定：
+
+- **$z$ 很大**：$\\sigma(z) \\approx 1$，$\\text{SiLU}(z) \\approx z$，基本原样通过。
+- **$z$ 很负**：$\\sigma(z) \\approx 0$，$\\text{SiLU}(z) \\approx 0$，基本被挡掉。
+- **$z = 0$**：$\\sigma(0) = 0.5$，$\\text{SiLU}(0) = 0$。
+
+![SiLU 曲线（−3.5 到 3.5），虚线是 y = z](/llm-explorer/notes/silu.svg)
+
+## 2. 具体的值
+
+下面是几个精确算出的值，顺便列上 [GELU](#info:gelu)（精确形式）做对比：
+
+\`\`\`text
+z          -6       -3       -1       0      1       3       6
+sigmoid    0.0025   0.0474   0.2689   0.5    0.7311  0.9526  0.9975
+SiLU      -0.0148  -0.1423  -0.2689   0      0.7311  2.8577  5.9852
+GELU      -0.0000  -0.0040  -0.1587   0      0.8413  2.9960  6.0000
+\`\`\`
+
+## 3. 和 GELU 比
+
+GELU 是 $z$ 乘以标准正态分布的累积概率 $\\Phi(z)$，SiLU 是 $z$ 乘以 $\\sigma(z)$。这两个比例都是从 0 平滑地升到 1，所以两条曲线几乎一样：
+
+![SiLU 和 GELU（−6 到 1.5）：SiLU 凹得更深、更靠左，回到 0 也更慢](/llm-explorer/notes/silu_vs_gelu.svg)
+
+- $z$ 为正时，两者都接近 $z$ 本身。
+- $z$ 为负时，两者都先往 0 下面凹一点，再回到 0。SiLU 凹得更深、更宽：最低点约 $-0.28$，在 $z \\approx -1.28$；GELU 最低点约 $-0.17$，在 $z \\approx -0.75$。到 $z = -3$ 时，SiLU 还有 $-0.14$，GELU 已经只剩 $-0.004$ 了。
+
+## 4. 两个名字：Swish 和 SiLU
+
+- **SiLU**（sigmoid linear unit）：$z \\cdot \\sigma(z)$。2016 年的 GELU 论文里就用这个名字提到过它。PyTorch 用的也是这个名字，即 \`F.silu\`。
+- **Swish**：$z \\cdot \\sigma(\\beta z)$，是 Google Brain 2017 年用自动搜索找出来的激活函数。$\\beta = 1$ 时就是 SiLU。
+
+在 LLaMA 里这两个名字指的是同一个函数。SwiGLU 里的 "Swi" 就来自 Swish。
+
+### Swish 是怎么找出来的
+
+Swish 不是研究人员凭直觉设计的。Ramachandran、Zoph 和 Le 让程序在大量候选函数里自动试，留下效果最好的：
+
+1. **定义零件。** 单输入的运算，比如 $z$、$-z$、$|z|$、$z^2$、$e^z$、$\\sin z$、$\\sigma(z)$、$\\tanh z$、$\\max(z, 0)$；双输入的运算，比如相加、相乘、取大、取小。一个候选函数就是把这些零件拼起来，比如 $z \\cdot \\sigma(z)$、$\\max(z, \\sin z)$，能拼出成千上万种。
+2. **提出候选。** 范围小的时候，把所有组合挨个试一遍。范围大的时候，用一个 RNN 来"写"候选函数，再用强化学习训练它，让它提出的候选越来越好。
+3. **打分。** 拿候选函数当激活函数，训练一个小网络（ResNet-20，在 CIFAR-10 图片分类数据集上），准确率就是分数，再反馈给 RNN。
+4. **验证最好的。** 分数最高的几个里，$z \\cdot \\sigma(\\beta z)$ 表现最稳定。作者把它命名为 Swish，又拿到更大的任务上试（ImageNet 图片分类、机器翻译），效果和当时最常用的 ReLU 持平甚至更好。
+
+所以 SiLU 是这个函数更早的名字，Swish 则是它被搜索重新发现、并因此流行起来时用的名字。
+
+## 参考资料
+
+1. **Gaussian Error Linear Units (GELUs) (2016).** Hendrycks 和 Gimpel 提出 GELU，文中也讨论了 SiLU。[GELU ↗](https://arxiv.org/abs/1606.08415)
+2. **Searching for Activation Functions (2017).** Ramachandran、Zoph 和 Le 用自动搜索找到了 Swish。[Swish ↗](https://arxiv.org/abs/1710.05941)
+`,
+    },
+  },
+
+  sigmoid_notes: {
+    en: {
+      title: "Sigmoid",
+      md: `
+**The sigmoid squeezes any number into the range between 0 and 1.**
+
+### Definition
+
+$$
+\\sigma(z) = \\frac{1}{1 + e^{-z}}
+$$
+
+For example, $z = 2$:
+
+$$
+e^{-2} = 0.1353, \\qquad 1 + 0.1353 = 1.1353, \\qquad \\sigma(2) = \\frac{1}{1.1353} = 0.8808
+$$
+
+### How it behaves
+
+- **Large positive $z$:** $e^{-z}$ is close to 0, so $\\sigma(z)$ is close to $\\frac{1}{1} = 1$.
+- **Very negative $z$:** $e^{-z}$ is huge, so $\\sigma(z)$ is close to 0.
+- **$z = 0$:** $e^{0} = 1$, so $\\sigma(0) = \\frac{1}{2} = 0.5$.
+
+![S-shaped sigmoid curve from −6 to 6, rising from 0 to 1, with σ(0) = 0.5 marked](/llm-explorer/notes/sigmoid.svg)
+
+\`\`\`text
+z          -6       -3       -1       0      1       3       6
+sigmoid    0.0025   0.0474   0.2689   0.5    0.7311  0.9526  0.9975
+\`\`\`
+
+The two sides mirror each other: $\\sigma(-z) = 1 - \\sigma(z)$. For example $\\sigma(-1) = 0.2689 = 1 - 0.7311$.
+
+### Where it is used
+
+Because its output is always between 0 and 1, the sigmoid is used wherever a model needs a "how much" fraction: the gate in SiLU, the original GLU and LSTMs, or the probability of "yes" in binary classification.
+`,
+    },
+    zh: {
+      title: "sigmoid",
+      md: `
+**sigmoid 能把任意一个数压到 0 和 1 之间。**
+
+### 定义
+
+$$
+\\sigma(z) = \\frac{1}{1 + e^{-z}}
+$$
+
+以 $z = 2$ 为例：
+
+$$
+e^{-2} = 0.1353, \\qquad 1 + 0.1353 = 1.1353, \\qquad \\sigma(2) = \\frac{1}{1.1353} = 0.8808
+$$
+
+### 它的样子
+
+- **$z$ 很大**：$e^{-z}$ 接近 0，$\\sigma(z)$ 接近 $\\frac{1}{1} = 1$。
+- **$z$ 很负**：$e^{-z}$ 非常大，$\\sigma(z)$ 接近 0。
+- **$z = 0$**：$e^{0} = 1$，$\\sigma(0) = \\frac{1}{2} = 0.5$。
+
+![sigmoid 的 S 形曲线（−6 到 6），从 0 升到 1，标出了 σ(0) = 0.5](/llm-explorer/notes/sigmoid.svg)
+
+\`\`\`text
+z          -6       -3       -1       0      1       3       6
+sigmoid    0.0025   0.0474   0.2689   0.5    0.7311  0.9526  0.9975
+\`\`\`
+
+左右两边是对称的：$\\sigma(-z) = 1 - \\sigma(z)$。比如 $\\sigma(-1) = 0.2689 = 1 - 0.7311$。
+
+### 用在哪里
+
+它的输出总在 0 和 1 之间，所以凡是模型需要一个"放多少"的比例时，常常就用它：SiLU 里的比例、最早的 GLU 和 LSTM 里的门，还有二分类里"是"的概率。
 `,
     },
   },
