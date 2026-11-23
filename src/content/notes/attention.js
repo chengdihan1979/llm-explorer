@@ -3531,9 +3531,14 @@ att = att.masked_fill(mask == 0, float('-inf'))
 
 \`dist >= 0\` is the causal part (no looking ahead); \`dist < self.window\` drops keys that are $W$ or more positions back.
 
-## 2. What it saves
+## 2. What it saves: compute
 
-**Compute.** Each query is scored against at most $W$ keys instead of $i + 1$. Counting the scores per head per layer:
+In attention, each query computes one score $q \\cdot k$ for every key it may see:
+
+- **Causal:** token $i$ computes $i + 1$ scores, more and more as the text goes on.
+- **Sliding window:** token $i$ computes at most $W$ scores. From token $W$ on, always exactly $W$.
+
+Adding them up over a whole sequence, per head per layer, with $W = 4096$:
 
 \`\`\`text
 sequence length    causal         window W = 4096    ratio
@@ -3543,53 +3548,183 @@ sequence length    causal         window W = 4096    ratio
 32,768           536.9M         125.8M                23%
 \`\`\`
 
-Up to $W$ tokens nothing changes. Past that, causal attention grows with the square of the length, the window only linearly.
+- Causal: $1 + 2 + \\dots + T \\approx T^2/2$. Doubling the length gives 4 times the scores.
+- Window: $1 + 2 + \\dots + W$ for the first $W$ tokens, then $W$ per token, about $T \\times W$. Doubling the length gives about 2 times the scores.
 
-**Memory.** A token never looks more than $W - 1$ positions back, so the KV cache only needs the last $W$ tokens. For Mistral 7B one token takes 128 KB (the same shape as [LLaMA 3 8B with GQA](#info:gqa_notes)), so the cache is capped at
+Three things to note:
 
-$$
-4096 \\times 128\\ \\text{KB} = 512\\ \\text{MB}
-$$
+1. **Up to $W$ tokens nothing changes.** Mistral 7B was trained with an 8K context, only twice $W$, so in training it saves just 25%.
+2. **The longer the text, the bigger the saving:** growth goes from quadratic to linear. This is the real point of the window.
+3. **Only attention gets cheaper.** The q/k/v projections and the MLP cost the same per token regardless of length, so the window does not touch them.
 
-per sequence, however long the text. Without the window, 32K tokens would need 4 GB.
+The paper reports about a 2× speed-up at 16K tokens, with modified FlashAttention and xFormers kernels.
 
-## 3. The rolling buffer cache
+## 3. What it saves: memory
 
-Mistral stores the cache in a fixed array of $W$ slots and writes token $i$ to slot $i \\bmod W$. With $W = 4$:
+When generating, a new token looks at most $W - 1$ positions back, so older tokens' $k$ and $v$ are never used again. The [KV cache](#info:kv_cache_notes) only needs the last $W$ tokens.
 
-\`\`\`text
-token:  0  1  2  3  4  5  6
-slot:   0  1  2  3  0  1  2
-\`\`\`
-
-Token 4 overwrites slot 0, which held token 0. That is exactly the token that just left the window: token 4 sees tokens 1 to 4.
-
-The slots are no longer in position order (slot 0 now holds token 4), but that does not matter:
-
-- Each $k$ was rotated by [RoPE](#info:rope_notes) at its own position **before** it was stored, so its position is already inside it.
-- Attention takes a weighted sum over the keys. Reordering the keys, together with their values, gives the same result.
-
-## 4. Information still travels beyond $W$
-
-In layer 1, token $i$ sees tokens $i - W + 1$ to $i$. But in layer 2, each of those tokens' inputs already contains what **they** saw in layer 1, which reaches another $W - 1$ positions back. Every layer extends the reach by $W - 1$.
-
-The same example with $W = 3$, following token 7:
+**One token's cache, step by step.** In each layer a token stores one $k$ and one $v$, each with 8 heads of 128 numbers:
 
 \`\`\`text
-after 1 layer:   token 7 has seen tokens 5-7
-after 2 layers:  tokens 3-7
-after 3 layers:  tokens 1-7
+k: 8 heads × 128 = 1024 numbers
+v: 8 heads × 128 = 1024 numbers
+per layer:              2048 numbers
+× 32 layers:          65,536 numbers
+× 2 bytes (bf16):    131,072 bytes = 128 KB
 \`\`\`
 
-For Mistral 7B, 32 layers with $W = 4096$ reach $32 \\times 4095 = 131{,}040$ tokens, the "theoretical attention span of about 131K" in the paper.
+It is 8 heads, not 32: the cache stores $k$ and $v$ **before** [GQA](#info:gqa_notes) repeats them, which is exactly where GQA saves memory.
 
-This reach is indirect. A token far back can only influence the output through the tokens in between, layer by layer, which is much weaker than attending to it directly. So the window saves compute and memory, but recall over long distances is worse than with full attention.
+**With and without the window**, per sequence:
 
-## 5. 🆕 Where the idea went
+\`\`\`text
+window, at most 4096 tokens:   4096 × 128 KB =  512 MB, however long the text
+no window, 32K tokens:        32768 × 128 KB = 4 GB    (8 times more)
+no window, 128K tokens:                         16 GB
+\`\`\`
 
-- **Earlier:** [GPT-3](#info:gpt3_notes) alternated full attention with locally banded attention, from the Sparse Transformer. Longformer (2020) combined a sliding window with a few global tokens.
-- **Mistral itself:** Mistral 7B v0.2 (2024) dropped the window and used full attention over a 32K context, with RoPE base $10^6$.
-- **Local and global layers:** Gemma 2 alternates sliding-window layers (window 4096) with full-attention layers one to one. Gemma 3 uses five local layers (window 1024) per global layer. Only the global layers need a full-length KV cache.
+These are per sequence: serving 10 requests at once needs 10 caches.
+
+## 4. The rolling buffer cache
+
+**The problem.** Each generated token adds a new $k$ and $v$, and only the last $W$ are needed. Two obvious ways to keep them are both bad:
+
+- **Keep appending and use only the last $W$:** the memory still grows without limit.
+- **Keep exactly $W$, and shift everything one place each step:** fixed memory, but every step moves $W - 1$ entries in every layer.
+
+The rolling buffer keeps $W$ fixed slots and moves nothing: each new token is written over the oldest one.
+
+**Which slot.** Token $i$ goes into slot $i \\bmod W$, the remainder of $i$ divided by $W$. With $W = 4$ the slot number counts 0, 1, 2, 3 and starts over, like a clock hand. Each step first writes the new token's $k$ and $v$, then its $q$ attends to everything in the buffer:
+
+\`\`\`text
+token   slot   slots 0  1  2  3 after writing   window of the new token
+  0      0           0  -  -  -                  0
+  1      1           0  1  -  -                  0-1
+  2      2           0  1  2  -                  0-2
+  3      3           0  1  2  3                  0-3
+  4      0           4  1  2  3                  1-4
+  5      1           4  5  2  3                  2-5
+  6      2           4  5  6  3                  3-6
+\`\`\`
+
+After each write, the buffer holds **exactly the new token's window**, so attention can use the whole buffer as it is.
+
+**Why the overwritten token is never needed.** Slot $i \\bmod W$ last held token $i - W$ (same remainder). The window of token $i$ is $i - W + 1$ to $i$, so $i - W$ is the token that has just left it. For example, token 4 overwrites token 0, and its window is tokens 1 to 4.
+
+**The slots are out of order, and that is fine.** After token 6 the buffer holds tokens [4, 5, 6, 3]. Two reasons this gives the same result:
+
+1. **The position is already inside each $k$.** Every $k$ was rotated by [RoPE](#info:rope_notes) at its own position before it was stored. A score $q \\cdot k$ uses only the two vectors, not the slot number. (GPT-2's learned position vectors would also work: they are added to the input, so every $k$ carries its position too. What would break are methods that add a distance-based bias at scoring time, such as ALiBi or T5's relative bias. They need each slot's real position stored next to it, not the slot number.)
+2. **Attention's weighted sum ignores order.** With $q = [1, 0]$, key A ($k = [1, 0]$, $v = 10$) and key B ($k = [0, 1]$, $v = 20$):
+
+\`\`\`text
+order A, B:  scores [1, 0]   softmax [0.731, 0.269]   output 0.731 × 10 + 0.269 × 20 = 12.69
+order B, A:  scores [0, 1]   softmax [0.269, 0.731]   output 0.269 × 20 + 0.731 × 10 = 12.69
+\`\`\`
+
+softmax and the weighted sum treat each key on its own, so the order does not matter. The condition is that **$k$ and $v$ move together**: weights [0.269, 0.731] paired with values [10, 20] would give 17.31. The buffer keeps them together because a token's $k$ and $v$ use the same slot number.
+
+**In memory.** Each layer has two fixed tensors, and each step writes once:
+
+\`\`\`python
+k_cache = torch.zeros(B, 8, W, 128)     # W slots
+v_cache = torch.zeros(B, 8, W, 128)
+
+slot = i % W                            # when generating token i
+k_cache[:, :, slot] = k_new
+v_cache[:, :, slot] = v_new
+\`\`\`
+
+No shifting and no new allocation.
+
+## 5. Information still travels beyond $W$
+
+The window limits what a token can **see** in one layer, not what can **reach** it over many layers. To see why, track one thing layer by layer: after each layer, which original tokens' information has been mixed into each token's vector (the residual stream at that position)?
+
+Example: 8 tokens (0 to 7) and $W = 3$, so each token sees itself and the 2 before it.
+
+**After the embedding.** Each vector is just the token's own embedding:
+
+\`\`\`text
+token 5 holds: 5
+token 6 holds: 6
+token 7 holds: 7
+\`\`\`
+
+**After layer 1.** Token 7 sees tokens 5, 6, 7 and mixes their vectors, so it now holds 5, 6, 7. In the same way, token 5 sees 3, 4, 5 and token 6 sees 4, 5, 6:
+
+\`\`\`text
+token 5 holds: 3 4 5
+token 6 holds: 4 5 6
+token 7 holds: 5 6 7
+\`\`\`
+
+**After layer 2: the key step.** Token 7 still sees only tokens 5, 6, 7; the window has not moved. But what it sees now are their vectors **after layer 1**, which already carry more:
+
+\`\`\`text
+token 5 brings: 3 4 5
+token 6 brings: 4 5 6
+token 7 brings: 5 6 7
+together:       3 4 5 6 7
+\`\`\`
+
+Token 7 never looked at token 3 directly. Token 5 looked at it in layer 1, then token 7 looked at token 5 in layer 2, and token 3's information was passed along.
+
+**After layer 3**, by the same argument, token 5 already holds 1 to 5, so token 7 gets 1 to 7:
+
+\`\`\`text
+after 1 layer:   token 7 holds 5-7
+after 2 layers:            3-7
+after 3 layers:            1-7
+\`\`\`
+
+Each layer reaches $W - 1 = 2$ positions further back. For Mistral 7B, 32 layers with $W = 4096$ reach $32 \\times 4095 = 131{,}040$ tokens: the "theoretical attention span of about 131K" in the paper.
+
+**Why this reach is weaker than seeing directly.** It works like a relay: token 1's information reaches token 7 only through token 3 (layer 2) and then token 5 (layer 3). Each hand-off can lose something:
+
+1. **Each hand-off squeezes it into a fixed-size vector.** Token 5's vector has 4096 numbers, which must hold its own content, information from several earlier tokens, and what it needs for its own prediction. Far-away information survives only in compressed form.
+2. **Each hand-off has to be chosen.** If token 5 gives little attention weight to token 3 in layer 3, token 1's information is dropped at that step.
+
+With full attention, token 7 can look at token 1's own $k$ and $v$ in any layer, in one step. So 131K is how far influence can **theoretically** reach, not how far the model can reliably use details. Recalling an exact detail from far back, such as a phone number, is much less reliable with a window. This is one reason Mistral 7B v0.2 dropped the window, and why Gemma keeps some full-attention layers.
+
+## 6. 🆕 Where the idea went
+
+### Before Mistral
+
+[GPT-3](#info:gpt3_notes) alternated full attention with locally banded attention, an idea from the Sparse Transformer. Longformer (2020) combined a sliding window with a few global tokens.
+
+### Mistral's own models
+
+\`\`\`text
+Mistral 7B v0.1    2023-09   sliding window W = 4096, 8K context, RoPE base 10,000
+Mixtral 8x7B       2023-12   mixture of experts, 32K context, no sliding window
+Mistral 7B v0.2    2024-03   32K context, no sliding window, RoPE base 1,000,000
+                             (the Instruct v0.2 model came out first, in 2023-12)
+Mistral 7B v0.3    2024-05   as v0.2, vocabulary 32,768
+Mistral NeMo 12B   2024-07   128K context, no sliding window
+Ministral 8B       2024-10   128K context, interleaved sliding window:
+                             some layers use the window, others full attention
+\`\`\`
+
+So a window in **every** layer appeared only in v0.1. Without the window, the rolling buffer cache goes too: the two come as a pair.
+
+### Why it was dropped
+
+Mistral did not explain this in detail. The usual reading:
+
+1. **Long-distance recall is unreliable.** Information from beyond the window arrives only by relay (section 5). Once contexts grow to 32K and 128K, this matters more.
+2. **Full attention got cheaper.** [GQA](#info:gqa_notes) had already cut the KV cache to a quarter (128 KB per token), and kernels such as FlashAttention made long-sequence attention much faster and lighter on memory. What the window still saves is not worth the lost long-range ability.
+3. **Long context came another way:** a larger RoPE base (1,000,000 in v0.2) plus further training on long texts, the same route as [LLaMA 3.1](#info:rope_notes).
+
+### Where it went: local and global layers
+
+Later models rarely use a window in every layer. Instead, **most layers use a window and some keep full attention**:
+
+- **Gemma 2** (2024): window layers (4096) and global layers alternate one to one.
+- **Gemma 3** (2025): five window layers (1024) per global layer.
+- **Ministral 8B** (2024): interleaved sliding window.
+- **gpt-oss** (OpenAI, 2025): full layers alternate with local layers whose window is only 128 tokens, much like GPT-3.
+
+The window layers save compute and KV cache, and only the global layers need a full-length cache. The global layers look at far-away tokens directly, so nothing has to travel by relay.
 
 ## References
 
@@ -3597,6 +3732,7 @@ This reach is indirect. A token far back can only influence the output through t
 2. **Generating Long Sequences with Sparse Transformers (2019).** Child et al. [Sparse Transformer ↗](https://arxiv.org/abs/1904.10509)
 3. **Longformer: The Long-Document Transformer (2020).** Beltagy et al. [Longformer ↗](https://arxiv.org/abs/2004.05150)
 4. **Gemma 2 (2024)** and **Gemma 3 (2025).** Local and global attention layers. [Gemma 2 ↗](https://arxiv.org/abs/2408.00118) · [Gemma 3 ↗](https://arxiv.org/abs/2503.19786)
+5. **gpt-oss-120b & gpt-oss-20b Model Card (2025).** OpenAI. [gpt-oss ↗](https://arxiv.org/abs/2508.10925)
 `,
     },
     zh: {
@@ -3633,9 +3769,14 @@ att = att.masked_fill(mask == 0, float('-inf'))
 
 \`dist >= 0\` 是因果那部分（不能往后看）；\`dist < self.window\` 把往前 $W$ 个位置及更远的 key 去掉。
 
-## 2. 省了什么
+## 2. 省了什么：计算
 
-**计算。** 每个 query 最多只和 $W$ 个 key 算分数，而不是 $i + 1$ 个。数一数每个 head、每一层要算多少个分数：
+attention 里，每个 query 要和它能看到的每个 key 各算一个分数 $q \\cdot k$：
+
+- **causal**：token $i$ 要算 $i + 1$ 个分数，越往后的 token 算得越多。
+- **滑动窗口**：token $i$ 最多算 $W$ 个。从第 $W$ 个 token 开始，固定是 $W$ 个。
+
+整条序列加起来，每个 head、每一层要算的分数（$W = 4096$）：
 
 \`\`\`text
 序列长度          causal         窗口 W = 4096      比例
@@ -3645,53 +3786,183 @@ att = att.masked_fill(mask == 0, float('-inf'))
 32,768          536.9M         125.8M                23%
 \`\`\`
 
-不超过 $W$ 时完全一样。超过以后，causal attention 随长度的平方增长，滑动窗口只是线性增长。
+- causal：$1 + 2 + \\dots + T \\approx T^2/2$。长度翻倍，分数变成 4 倍。
+- 滑动窗口：前 $W$ 个 token 算 $1 + 2 + \\dots + W$，之后每个 token 都算 $W$ 个，约等于 $T \\times W$。长度翻倍，分数只变成大约 2 倍。
 
-**内存。** 一个 token 最多往前看 $W - 1$ 个位置，所以 KV cache 只需要留最近的 $W$ 个 token。Mistral 7B 每个 token 占 128 KB（和[用 GQA 的 LLaMA 3 8B](#info:gqa_notes) 一样），所以缓存最多是
+有三点要注意：
 
-$$
-4096 \\times 128\\ \\text{KB} = 512\\ \\text{MB}
-$$
+1. **不超过 $W$ 时完全没区别。** Mistral 7B 训练时上下文是 8K，只是 $W$ 的两倍，所以训练时只省了 25%。
+2. **文本越长省得越多**：增长从平方变成了线性，这才是滑动窗口真正的价值。
+3. **只有 attention 变省了。** q/k/v 的投影和 MLP，每个 token 的计算量本来就和长度无关，滑动窗口管不到它们。
 
-每条序列都是这么多，不管文本有多长。不加窗口的话，32K 个 token 要 4 GB。
+论文里说，配合改过的 FlashAttention 和 xFormers，在 16K 长度上速度大约提高到 2 倍。
 
-## 3. 循环缓冲区（rolling buffer）
+## 3. 省了什么：内存
 
-Mistral 把缓存放在一个固定的、有 $W$ 个槽位的数组里，token $i$ 写进第 $i \\bmod W$ 个槽。以 $W = 4$ 为例：
+生成时，新 token 最多往前看 $W - 1$ 个位置，更早的 token 的 $k$、$v$ 再也不会被用到。所以 [KV cache](#info:kv_cache_notes) 只需要留最近 $W$ 个 token。
 
-\`\`\`text
-token：  0  1  2  3  4  5  6
-槽位：   0  1  2  3  0  1  2
-\`\`\`
-
-token 4 覆盖了槽 0，原来存的是 token 0，而它正好是刚刚移出窗口的那个：token 4 只看 token 1 到 4。
-
-这样一来，槽里的顺序就不再按位置排了（槽 0 现在放的是 token 4），但这没关系：
-
-- 每个 $k$ 在存进去**之前**，已经按自己的位置用 [RoPE](#info:rope_notes) 转过了，位置信息已经在它里面。
-- attention 是对所有 key 加权求和。把 key 连同它们的 value 一起换个顺序，结果完全一样。
-
-## 4. 信息仍然能传到 $W$ 之外
-
-第 1 层里，token $i$ 看的是 token $i - W + 1$ 到 $i$。但到了第 2 层，这些 token 的输入里已经带着**它们**在第 1 层看到的东西，又往前延伸了 $W - 1$ 个位置。每多一层，能触及的范围就再远 $W - 1$。
-
-还是 $W = 3$ 的例子，看 token 7：
+**一个 token 的缓存，一步步算。** 每一层里，一个 token 存一个 $k$ 和一个 $v$，各有 8 个 head、每个 head 128 个数：
 
 \`\`\`text
-1 层之后：token 7 已经"看过" token 5-7
-2 层之后：token 3-7
-3 层之后：token 1-7
+k：8 个 head × 128 = 1024 个数
+v：8 个 head × 128 = 1024 个数
+每层：                  2048 个数
+× 32 层：             65,536 个数
+× 2 字节（bf16）：   131,072 字节 = 128 KB
 \`\`\`
 
-Mistral 7B 有 32 层，$W = 4096$，能触及 $32 \\times 4095 = 131{,}040$ 个 token，也就是论文里说的"理论注意力范围约 131K"。
+这里是 8 个 head，不是 32 个：缓存里存的是 [GQA](#info:gqa_notes) 复制**之前**的 $k$、$v$，GQA 省内存就省在这里。
 
-不过这种触及是间接的。很远的 token 只能一层一层地经过中间的 token 才能影响输出，远不如直接看到它。所以滑动窗口省了计算和内存，但长距离的信息找回能力比不上完整的 attention。
+**有窗口和没窗口**，每条序列：
 
-## 5. 🆕 后来的发展
+\`\`\`text
+有窗口，最多 4096 个 token：   4096 × 128 KB = 512 MB，文本再长也是这么多
+没窗口，32K 个 token：       32768 × 128 KB = 4 GB    （多 8 倍）
+没窗口，128K 个 token：                        16 GB
+\`\`\`
 
-- **更早的做法**：[GPT-3](#info:gpt3_notes) 让完整 attention 和局部带状 attention 交替使用，来自 Sparse Transformer。Longformer（2020）把滑动窗口和少量全局 token 结合起来。
-- **Mistral 自己**：Mistral 7B v0.2（2024）去掉了滑动窗口，改成在 32K 上下文上做完整 attention，RoPE base 改成 $10^6$。
-- **局部层和全局层搭配**：Gemma 2 让滑动窗口层（窗口 4096）和完整 attention 层一比一交替。Gemma 3 是每 5 个局部层（窗口 1024）配 1 个全局层。只有全局层需要完整长度的 KV cache。
+这些都是一条序列的数字：同时服务 10 个请求，就要 10 份缓存。
+
+## 4. 循环缓冲区（rolling buffer）
+
+**要解决的问题。** 每生成一个 token，就多出一份 $k$、$v$，而我们只需要最近 $W$ 个。两种最直接的做法都不好：
+
+- **一直往后追加，用的时候只取最后 $W$ 个**：内存还是无限增长。
+- **只留 $W$ 个，每来一个新的，就把所有元素往前挪一格**：内存固定了，但每一步、每一层都要搬动 $W - 1$ 份数据。
+
+rolling buffer 的做法是：固定 $W$ 个槽，谁也不挪，新来的直接写到最旧的那个上面。
+
+**写进哪个槽。** token $i$ 写进第 $i \\bmod W$ 个槽，也就是 $i$ 除以 $W$ 的余数。$W = 4$ 时，槽号按 0、1、2、3 数，然后回到 0 重新数，像钟表的指针转圈。每一步先把新 token 的 $k$、$v$ 写进去，再让它的 $q$ 去和缓冲区里所有的 key 算 attention：
+
+\`\`\`text
+token   槽号   写完后 槽 0  1  2  3      新 token 的窗口
+  0      0           0  -  -  -           0
+  1      1           0  1  -  -           0-1
+  2      2           0  1  2  -           0-2
+  3      3           0  1  2  3           0-3
+  4      0           4  1  2  3           1-4
+  5      1           4  5  2  3           2-5
+  6      2           4  5  6  3           3-6
+\`\`\`
+
+每写完一个，缓冲区里**正好就是新 token 的窗口**，不多也不少，直接拿整个缓冲区去算 attention 就行。
+
+**为什么被覆盖的一定用不着。** 槽 $i \\bmod W$ 上一次存的是 token $i - W$（余数相同）。token $i$ 的窗口是 $i - W + 1$ 到 $i$，$i - W$ 正好是刚移出窗口的那个。比如 token 4 覆盖了 token 0，而它的窗口是 token 1 到 4。
+
+**槽的顺序乱了，没关系。** 写完 token 6，缓冲区里是 [4, 5, 6, 3]。结果不受影响，有两个原因：
+
+1. **位置信息已经在每个 $k$ 里了。** 每个 $k$ 存进去之前，已经按它自己的位置用 [RoPE](#info:rope_notes) 转过了。算 $q \\cdot k$ 只用到这两个向量，不看槽号。（GPT-2 学出来的位置向量也没问题：它加在输入上，每个 $k$ 同样带着自己的位置。会出问题的是在算分数时才按距离加偏置的方法，比如 ALiBi 和 T5 的相对位置偏置。它们需要在每个槽旁边记下真实位置，不能拿槽号当位置。）
+2. **attention 的加权求和不在乎顺序。** 设 $q = [1, 0]$，key A 的 $k = [1, 0]$、$v = 10$，key B 的 $k = [0, 1]$、$v = 20$：
+
+\`\`\`text
+顺序 A, B：分数 [1, 0]   softmax [0.731, 0.269]   输出 0.731 × 10 + 0.269 × 20 = 12.69
+顺序 B, A：分数 [0, 1]   softmax [0.269, 0.731]   输出 0.269 × 20 + 0.731 × 10 = 12.69
+\`\`\`
+
+softmax 和加权求和都是对每个 key 各自计算再加起来，跟谁排前面无关。前提是 **$k$ 和 $v$ 必须一起换位置**：如果权重 [0.269, 0.731] 配上的是 [10, 20]，结果就成了 17.31。缓冲区里同一个 token 的 $k$ 和 $v$ 用同一个槽号，所以它们总是绑在一起。
+
+**在内存里。** 每一层有两块固定大小的张量，每一步只写一次：
+
+\`\`\`python
+k_cache = torch.zeros(B, 8, W, 128)     # W 个槽
+v_cache = torch.zeros(B, 8, W, 128)
+
+slot = i % W                            # 生成 token i 时
+k_cache[:, :, slot] = k_new
+v_cache[:, :, slot] = v_new
+\`\`\`
+
+不用搬数据，也不用重新分配内存。
+
+## 5. 信息仍然能传到 $W$ 之外
+
+窗口限制的是一个 token 在**一层里**能看到什么，而不是经过很多层以后什么能**传到**它这里。为了看清这一点，我们一层一层追踪一件事：每一层结束后，每个 token 的向量（也就是残差流在这个位置的值）里，混进了哪些原始 token 的信息？
+
+例子：8 个 token（0 到 7），$W = 3$，每个 token 只能看自己和前面 2 个。
+
+**刚做完 embedding。** 每个向量只是 token 自己的 embedding：
+
+\`\`\`text
+token 5 里有：5
+token 6 里有：6
+token 7 里有：7
+\`\`\`
+
+**第 1 层之后。** token 7 看 token 5、6、7，把它们的向量混在一起，所以它现在有 5、6、7。同样，token 5 看 3、4、5，token 6 看 4、5、6：
+
+\`\`\`text
+token 5 里有：3 4 5
+token 6 里有：4 5 6
+token 7 里有：5 6 7
+\`\`\`
+
+**第 2 层之后：关键的一步。** token 7 还是只能看 token 5、6、7，窗口没动。但它这次看到的是这三个 token **第 1 层之后**的向量，里面已经装了别的东西：
+
+\`\`\`text
+token 5 带来：3 4 5
+token 6 带来：4 5 6
+token 7 带来：5 6 7
+合起来：      3 4 5 6 7
+\`\`\`
+
+token 7 从来没有直接看过 token 3。是 token 5 在第 1 层看了 token 3，token 7 又在第 2 层看了 token 5，token 3 的信息就这样被转手带了过来。
+
+**第 3 层之后**，同样的道理：token 5 此时已经有 1 到 5，token 7 看了它，就拿到了 1 到 7：
+
+\`\`\`text
+1 层之后：token 7 有 5-7
+2 层之后：          3-7
+3 层之后：          1-7
+\`\`\`
+
+每多一层，就往前多够到 $W - 1 = 2$ 个位置。Mistral 7B 有 32 层、$W = 4096$，能够到 $32 \\times 4095 = 131{,}040$ 个 token，也就是论文里说的"理论注意力范围约 131K"。
+
+**为什么这种"够到"比不上直接看。** 这像传话接力：token 1 的信息要先经 token 3（第 2 层），再经 token 5（第 3 层），才能到 token 7。每传一棒都可能有损失：
+
+1. **每一棒都要挤进一个固定大小的向量。** token 5 的向量只有 4096 个数，要装它自己的内容、前面好几个 token 的信息，还要服务它自己的预测。远处的信息只能被压缩着保留下来。
+2. **每一棒都得被选中。** 如果 token 5 在第 3 层几乎没把注意力分给 token 3，token 1 的信息在这一棒就丢了。
+
+完整的 attention 里，token 7 在任何一层都能直接看 token 1 原原本本的 $k$ 和 $v$，一步到位。所以 131K 只是影响**理论上**能传多远，不代表模型能可靠地用上那么远的细节。比如要准确想起很久以前出现的一个电话号码，有窗口的模型要靠不住得多。这也是 Mistral 7B v0.2 去掉窗口、Gemma 要保留一部分全局层的原因之一。
+
+## 6. 🆕 后来的发展
+
+### Mistral 之前
+
+[GPT-3](#info:gpt3_notes) 让完整 attention 和局部带状 attention 交替使用，这个思路来自 Sparse Transformer。Longformer（2020）把滑动窗口和少量全局 token 结合了起来。
+
+### Mistral 自己的模型
+
+\`\`\`text
+Mistral 7B v0.1    2023-09   滑动窗口 W = 4096，8K 上下文，RoPE base 10,000
+Mixtral 8x7B       2023-12   混合专家（MoE），32K 上下文，没有滑动窗口
+Mistral 7B v0.2    2024-03   32K 上下文，没有滑动窗口，RoPE base 1,000,000
+                             （同名的 Instruct v0.2 在 2023-12 先发布）
+Mistral 7B v0.3    2024-05   同 v0.2，词表扩到 32,768
+Mistral NeMo 12B   2024-07   128K 上下文，没有滑动窗口
+Ministral 8B       2024-10   128K 上下文，交错的滑动窗口：
+                             一部分层用窗口，一部分层用完整 attention
+\`\`\`
+
+所以"每一层都用滑动窗口"只在 v0.1 出现过。没有了窗口，rolling buffer 也就用不上了，这两个是绑在一起的。
+
+### 为什么不用了
+
+Mistral 没有详细解释原因，比较普遍的看法是：
+
+1. **长距离的信息找回不够可靠。** 窗口外的信息只能一层层接力传过来（见第 5 节）。上下文拉到 32K、128K 以后，这个问题更突出。
+2. **完整 attention 没那么贵了。** [GQA](#info:gqa_notes) 已经把 KV cache 缩到了四分之一（每个 token 128 KB），FlashAttention 这类 kernel 又让长序列 attention 快了很多、也省了很多显存。窗口还能省下的那部分，抵不上丢掉的长距离能力。
+3. **长上下文有了别的做法**：调大 RoPE base（v0.2 改成了 100 万），再用长文本继续训练，和 [LLaMA 3.1](#info:rope_notes) 走的是同一条路。
+
+### 思路去了哪里：局部层和全局层搭配
+
+后来的模型很少再每一层都用窗口，而是**大部分层用窗口，留一部分层用完整 attention**：
+
+- **Gemma 2**（2024）：窗口层（4096）和全局层一比一交替。
+- **Gemma 3**（2025）：每 5 个窗口层（1024）配 1 个全局层。
+- **Ministral 8B**（2024）：交错的滑动窗口。
+- **gpt-oss**（OpenAI，2025）：完整层和窗口只有 128 个 token 的局部层交替，和 GPT-3 当年的做法很像。
+
+窗口层省下了计算和 KV cache，只有全局层需要完整长度的缓存。远处的 token 由全局层直接去看，不用再靠接力。
 
 ## 参考资料
 
@@ -3699,6 +3970,7 @@ Mistral 7B 有 32 层，$W = 4096$，能触及 $32 \\times 4095 = 131{,}040$ 个
 2. **Generating Long Sequences with Sparse Transformers (2019).** Child 等人。[Sparse Transformer ↗](https://arxiv.org/abs/1904.10509)
 3. **Longformer: The Long-Document Transformer (2020).** Beltagy 等人。[Longformer ↗](https://arxiv.org/abs/2004.05150)
 4. **Gemma 2 (2024)** 和 **Gemma 3 (2025).** 局部层和全局层的搭配。[Gemma 2 ↗](https://arxiv.org/abs/2408.00118) · [Gemma 3 ↗](https://arxiv.org/abs/2503.19786)
+5. **gpt-oss-120b & gpt-oss-20b Model Card (2025).** OpenAI。[gpt-oss ↗](https://arxiv.org/abs/2508.10925)
 `,
     },
   },
