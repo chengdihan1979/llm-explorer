@@ -200,6 +200,7 @@ const STEPS = [
     },
     highlight: ["attn_rope"],
     note: "rope_notes",
+    compare: "attention_compare_notes",
   },
   {
     title: { en: "Grouped-query attention", zh: "分组查询注意力（GQA）" },
@@ -216,6 +217,7 @@ const STEPS = [
     },
     highlight: ["attn_linear_qkv", "attn_repeat_kv", "block_attn"],
     note: "gqa_notes",
+    compare: "attention_compare_notes",
   },
   {
     title: { en: "SwiGLU MLP", zh: "MLP 换成 SwiGLU" },

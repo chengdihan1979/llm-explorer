@@ -225,6 +225,8 @@ export function buildCodeHtml({ component, selectedId, noteOverrides = {} }) {
   // LLaMA's block: CausalSelfAttention(...) and MLP(...) jump to their code.
   html = html.replace(/= (CausalSelfAttention)(?=\((?:<\/mark>)?n_embd=n_embd, n_head=n_head, n_kv_head)/g, '= <span data-action="select:attn_class" style="text-decoration: underline; cursor: pointer;">$1</span>');
   html = html.replace(/= (MLP)(?=\(n_embd=n_embd, hidden=hidden\))/g, '= <span data-action="select:mlp_subdiagram" style="text-decoration: underline; cursor: pointer;">$1</span>');
+  // DeepSeek's MLA: the down and up projections of k/v open the MLA note.
+  html = html.replace(/\b(kv_down|kv_up)\b/g, (m) => `<span data-action="open:mla_notes" style="text-decoration: underline; cursor: pointer;">${m}</span>`);
   // DeepSeek's block: CausalSelfAttention(C, ...), MoE(C, ...) and MLP(C, ...) jump to their code.
   html = html.replace(/= (CausalSelfAttention)(?=\(C, cfg)/g, '= <span data-action="select:attn_class" style="text-decoration: underline; cursor: pointer;">$1</span>');
   html = html.replace(/= (MoE|MLP)(?=\(C, cfg)/g, '= <span data-action="select:mlp_subdiagram" style="text-decoration: underline; cursor: pointer;">$1</span>');

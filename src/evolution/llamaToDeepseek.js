@@ -70,7 +70,8 @@ const STEPS = [
       relabel(s, { block_attn: "Multi-head Latent Attention (MLA)" });
     },
     highlight: ["attn_linear_qkv", "attn_kv_down", "attn_kv_up", "block_attn", "attn:title"],
-    note: "kv_cache_notes",
+    note: "mla_notes",
+    compare: "attention_compare_notes",
   },
   {
     title: { en: "Decoupled RoPE", zh: "解耦的 RoPE" },
@@ -81,6 +82,7 @@ const STEPS = [
     change: (s) => relabel(s, { attn_rope: "Decoupled RoPE (64-d part)" }),
     highlight: ["attn_rope"],
     note: "rope_notes",
+    compare: "attention_compare_notes",
   },
   {
     title: { en: "Mixture of experts", zh: "混合专家（MoE）" },

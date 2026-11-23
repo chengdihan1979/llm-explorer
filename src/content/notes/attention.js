@@ -2352,7 +2352,7 @@ MLP 分支在同样的位置也有 residual dropout：\`x = x + mlp(ln2(x))\`，
     en: {
       title: "Causal Analogy",
       md: `
-[Causal Analogy](#info:causal_analogy_notes) · [Attention Inference Example](#info:attn_inference_example_notes)
+[Causal Analogy](#info:causal_analogy_notes) · [Attention Inference Example](#info:attn_inference_example_notes) · [Attention across the models](#info:attention_compare_notes)
 
 **Below is an analogy that shows how the GPT-2 multi-head self-attention block works, to give you an intuitive understanding.**
 
@@ -2513,7 +2513,7 @@ Stitch the head outputs back into one vector per position, project to model widt
     zh: {
       title: "因果类比",
       md: `
-[因果类比](#info:causal_analogy_notes) · [Attention 推理示例](#info:attn_inference_example_notes)
+[因果类比](#info:causal_analogy_notes) · [Attention 推理示例](#info:attn_inference_example_notes) · [各模型的 attention 对比](#info:attention_compare_notes)
 
 **下面用一个类比来说明 GPT-2 的多头 self-attention 块是怎么工作的，帮你建立直觉。**
 
@@ -2677,7 +2677,7 @@ $$
     en: {
       title: "Attention Inference Example",
       md: `
-[Causal Analogy](#info:causal_analogy_notes) · [Attention Inference Example](#info:attn_inference_example_notes)
+[Causal Analogy](#info:causal_analogy_notes) · [Attention Inference Example](#info:attn_inference_example_notes) · [Attention across the models](#info:attention_compare_notes)
 
 **This example shows how a single attention head can infer the correct verb form (\`were\` vs \`was\`) from the context of the sentence.**
 
@@ -2846,7 +2846,7 @@ Think of each vocab token as a row that dots with the hidden vector.
     zh: {
       title: "Attention 推理示例",
       md: `
-[因果类比](#info:causal_analogy_notes) · [Attention 推理示例](#info:attn_inference_example_notes)
+[因果类比](#info:causal_analogy_notes) · [Attention 推理示例](#info:attn_inference_example_notes) · [各模型的 attention 对比](#info:attention_compare_notes)
 
 **这个例子展示单个 attention head 如何根据句子上下文推断出正确的动词形式（\`were\` 还是 \`was\`）。**
 
@@ -3020,6 +3020,8 @@ $$
       md: `
 **🆕 In grouped-query attention (GQA), several query heads share one key head and one value head. LLaMA 3 8B has 32 query heads but only 8 key/value heads. The point is to shrink the [KV cache](#info:kv_cache_notes), the k and v that a model stores while it generates text.**
 
+> 📊 How this compares with the other models on this site: [Attention across the models](#info:attention_compare_notes).
+
 ## 1. From MHA to GQA
 
 **GPT-2: every head has its own q, k, v.** GPT-2 small has 12 heads:
@@ -3132,6 +3134,8 @@ The idea of GQA in one sentence: keep 32 query heads, so each head can still cho
       title: "分组查询注意力（GQA）与 KV cache",
       md: `
 **🆕 分组查询注意力（GQA）让几个 query head 共用同一组 key 和 value。LLaMA 3 8B 有 32 个 query head，但 key/value head 只有 8 个。这样做主要是为了缩小 [KV cache](#info:kv_cache_notes)，也就是模型生成文本时一直存着的那些 k 和 v。**
+
+> 📊 和本站其他模型放在一起比：[各模型的 attention 对比](#info:attention_compare_notes)。
 
 ## 1. 从 MHA 到 GQA
 
@@ -3249,6 +3253,8 @@ GQA（ 8 个 k/v head）      128 KB         1 GB          16 GB
       md: `
 **When a model generates text, it keeps the $k$ and $v$ of every earlier token in memory, so it does not have to recompute them at every step. This store is the KV cache. It saves a great deal of computation, but at long contexts it takes a lot of memory, and many newer techniques exist just to make it smaller.**
 
+> 📊 How this compares with the other models on this site: [Attention across the models](#info:attention_compare_notes).
+
 ## 1. Why cache anything
 
 A model generates one token at a time. Each new token goes back into the input, and the model runs again to produce the next one.
@@ -3332,7 +3338,7 @@ At every decode step, the GPU reads all the model weights and the whole KV cache
 
 ## 7. 🆕 Ways to make it smaller
 
-Every factor in the size formula above has been attacked:
+Every factor in the size formula above has been attacked. For the cache sizes of the models on this site side by side, see [Attention across the models](#info:attention_compare_notes).
 
 **Fewer k/v heads.**
 
@@ -3341,7 +3347,7 @@ Every factor in the size formula above has been attacked:
 
 **Smaller k and v.**
 
-- **MLA** (DeepSeek-V2, 2024): store one low-dimensional compressed vector per token and reconstruct $k$ and $v$ from it when needed. DeepSeek reports a 93% smaller cache than its earlier 67B model.
+- **[MLA](#info:mla_notes)** (DeepSeek-V2, 2024): store one low-dimensional compressed vector per token and reconstruct $k$ and $v$ from it when needed. DeepSeek reports a 93% smaller cache than its earlier 67B model.
 - **Quantization:** store $k$ and $v$ in 8 or 4 bits instead of 16.
 
 **Fewer tokens.**
@@ -3373,6 +3379,8 @@ Every factor in the size formula above has been attacked:
       title: "KV cache",
       md: `
 **模型生成文本时，会把前面每个 token 的 $k$ 和 $v$ 存在内存里，这样每一步就不用重新算。存下来的这些东西就叫 KV cache。它省掉了大量计算，但上下文一长就非常占内存，所以后来出现了很多专门给它"瘦身"的技术。**
+
+> 📊 和本站其他模型放在一起比：[各模型的 attention 对比](#info:attention_compare_notes)。
 
 ## 1. 为什么要缓存
 
@@ -3457,7 +3465,7 @@ decode 的每一步，GPU 都要从显存里把所有权重和整个 KV cache �
 
 ## 7. 🆕 给 KV cache 瘦身的方法
 
-上面公式里的每一项，都有人想办法压缩：
+上面公式里的每一项，都有人想办法压缩。本站几个模型的缓存大小放在一起的比较，见[各模型的 attention 对比](#info:attention_compare_notes)。
 
 **减少 k/v head 数。**
 
@@ -3466,7 +3474,7 @@ decode 的每一步，GPU 都要从显存里把所有权重和整个 KV cache �
 
 **把 k、v 本身变小。**
 
-- **MLA**（DeepSeek-V2，2024）：每个 token 只存一个低维的压缩向量，用的时候再从它还原出 $k$ 和 $v$。DeepSeek 说 KV cache 比他们之前的 67B 模型小了 93%。
+- **[MLA](#info:mla_notes)**（DeepSeek-V2，2024）：每个 token 只存一个低维的压缩向量，用的时候再从它还原出 $k$ 和 $v$。DeepSeek 说 KV cache 比他们之前的 67B 模型小了 93%。
 - **量化**：把 $k$、$v$ 从 16 位改成 8 位甚至 4 位来存。
 
 **少存一些 token。**
@@ -3501,6 +3509,8 @@ decode 的每一步，GPU 都要从显存里把所有权重和整个 KV cache �
       title: "Sliding-window attention",
       md: `
 **🆕 In sliding-window attention, each token attends only to the last $W$ tokens (itself included), not to every earlier token. Mistral 7B uses $W = 4096$. Beyond that length, the attention cost per token and the [KV cache](#info:kv_cache_notes) stop growing, and stacking layers still lets information travel much further than $W$.**
+
+> 📊 How this compares with the other models on this site: [Attention across the models](#info:attention_compare_notes).
 
 ## 1. The mask
 
@@ -3740,6 +3750,8 @@ The window layers save compute and KV cache, and only the global layers need a f
       md: `
 **🆕 滑动窗口注意力（sliding-window attention）里，每个 token 只看最近的 $W$ 个 token（包括自己），而不是前面所有 token。Mistral 7B 用的是 $W = 4096$。文本超过这个长度以后，每个 token 的 attention 计算量和 [KV cache](#info:kv_cache_notes) 都不再增长；层层叠起来，信息仍然能传到比 $W$ 远得多的地方。**
 
+> 📊 和本站其他模型放在一起比：[各模型的 attention 对比](#info:attention_compare_notes)。
+
 ## 1. mask 长什么样
 
 普通的 [causal mask](#info:causal_mask_notes)（GPT-2、LLaMA）里，token $i$ 能看到 token $0, 1, \\dots, i$。加了滑动窗口，它只能看到 token $i - W + 1, \\dots, i$。
@@ -3971,6 +3983,292 @@ Mistral 没有详细解释原因，比较普遍的看法是：
 3. **Longformer: The Long-Document Transformer (2020).** Beltagy 等人。[Longformer ↗](https://arxiv.org/abs/2004.05150)
 4. **Gemma 2 (2024)** 和 **Gemma 3 (2025).** 局部层和全局层的搭配。[Gemma 2 ↗](https://arxiv.org/abs/2408.00118) · [Gemma 3 ↗](https://arxiv.org/abs/2503.19786)
 5. **gpt-oss-120b & gpt-oss-20b Model Card (2025).** OpenAI。[gpt-oss ↗](https://arxiv.org/abs/2508.10925)
+`,
+    },
+  },
+
+  mla_notes: {
+    en: {
+      title: "Multi-head latent attention (MLA)",
+      md: `
+**🆕 Multi-head latent attention (MLA), from DeepSeek-V2 and used in DeepSeek-V3, shrinks the [KV cache](#info:kv_cache_notes) without making heads share $k$ and $v$. Each head keeps its own $k$ and $v$, but the cache stores only a small compressed vector per token, and the $k$ and $v$ of all heads are rebuilt from it.**
+
+> 📊 How this compares with the other models on this site: [Attention across the models](#info:attention_compare_notes).
+
+## 1. The problem: the KV cache
+
+When generating, every token stores its $k$ and $v$ in every layer. DeepSeek-V3 has 128 heads of 128 dimensions. If it used ordinary multi-head attention (MHA), which it does not, one token in one layer would store:
+
+\`\`\`text
+k: 128 heads × 128 = 16,384 numbers
+v: 128 heads × 128 = 16,384 numbers
+total:               32,768 numbers
+\`\`\`
+
+Over 61 layers at 2 bytes per number, that is about **3.8 MB per token**, and close to 500 GB for a 128K context. It does not fit.
+
+## 2. GQA's answer: share k and v between heads
+
+[GQA](#info:gqa_notes), as in LLaMA 3, lets several query heads share one $k$ and $v$. Keeping 8 groups would make the cache 16 times smaller.
+
+The price is that heads can no longer have their own $k$ and $v$. The more they share, the closer the model gets to MQA (a single $k$ and $v$ for all heads), and quality drops.
+
+## 3. MLA's answer: compress instead of share
+
+MLA keeps a separate $k$ and $v$ for each of the 128 heads, but does not cache them. It caches a small compressed version:
+
+\`\`\`python
+c_kv = kv_down(x)      # 7168 -> 512: this is what goes into the cache
+kv   = kv_up(c_kv)     # 512 -> k and v for each of the 128 heads
+\`\`\`
+
+- **\`x\`** is the attention input: the token's vector in this layer after RMSNorm. Every token in DeepSeek-V3 is a 7168-dimension vector, the model's width (GPT-2 small: 768, LLaMA 3 8B: 4096).
+- **\`kv_down\`** is a linear layer with a 7168 × 512 weight. It compresses that input into one 512-dimension vector $c_{kv}$, called the **latent**: 14 times narrower than the token itself.
+- **\`kv_up\`** rebuilds the $k$ and $v$ of every head from those 512 numbers when they are needed.
+
+Only $c_{kv}$ is cached. Per token, per layer:
+
+\`\`\`text
+MHA (128 sets of k, v):   32,768 numbers   # hypothetical: DeepSeek-V3 with MHA
+GQA (8 sets of k, v):      2,048 numbers   # hypothetical: DeepSeek-V3 with 8-group GQA
+MLA (the latent):            512 numbers   (plus 64 for position, see the decoupled RoPE)
+\`\`\`
+
+With the 64 position numbers, MLA stores 576 per layer, about 1/57 of 32,768. [Attention across the models](#info:attention_compare_notes) puts these numbers next to GPT-2, GPT-3, LLaMA 3 and Mistral.
+
+## 4. Why compression can work
+
+\`kv_up\` is one fixed linear layer, so the $k$ and $v$ of all heads are different linear combinations of the same 512 numbers. Together they have 32,768 numbers, but at most 512 dimensions of independent information. Such a matrix is called **low-rank**.
+
+MLA bets that 512 dimensions are enough to hold what $k$ and $v$ really need. In DeepSeek-V2's ablations, MLA matched or slightly beat MHA in quality, with a small fraction of its cache.
+
+## References
+
+1. **DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model (2024).** Introduces MLA. [DeepSeek-V2 ↗](https://arxiv.org/abs/2405.04434)
+2. **DeepSeek-V3 Technical Report (2024).** MLA with a 512-d KV latent and 128 heads. [DeepSeek-V3 ↗](https://arxiv.org/abs/2412.19437)
+`,
+    },
+    zh: {
+      title: "多头潜在注意力（MLA）",
+      md: `
+**🆕 多头潜在注意力（multi-head latent attention，MLA）由 DeepSeek-V2 提出，DeepSeek-V3 也在用。它缩小 [KV cache](#info:kv_cache_notes) 的方式不是让 head 共用 $k$、$v$：每个 head 仍然有自己的 $k$ 和 $v$，但缓存里每个 token 只存一个很小的压缩向量，所有 head 的 $k$、$v$ 都从它还原出来。**
+
+> 📊 和本站其他模型放在一起比：[各模型的 attention 对比](#info:attention_compare_notes)。
+
+## 1. 问题：KV cache
+
+生成时，每个 token 在每一层都要把 $k$ 和 $v$ 存下来。DeepSeek-V3 有 128 个 head，每个 head 128 维。假设它用的是普通的多头注意力（MHA）（实际并没有），一个 token 在一层里要存：
+
+\`\`\`text
+k：128 个 head × 128 = 16,384 个数
+v：128 个 head × 128 = 16,384 个数
+合计：                 32,768 个数
+\`\`\`
+
+乘上 61 层、每个数 2 字节，**每个 token 约 3.8 MB**；128K 的上下文就要将近 500 GB，根本放不下。
+
+## 2. GQA 的办法：让 head 共用 k、v
+
+LLaMA 3 用的 [GQA](#info:gqa_notes) 让几个 query head 共用一组 $k$、$v$。比如只留 8 组，缓存就小 16 倍。
+
+代价是 head 之间不能各有各的 $k$、$v$ 了。共用得越多，就越接近所有 head 只有一组 $k$、$v$ 的 MQA，效果也会跟着变差。
+
+## 3. MLA 的办法：不共用，而是压缩
+
+MLA 让 128 个 head 仍然各有自己的 $k$ 和 $v$，但缓存里不存它们，只存一个很小的压缩版：
+
+\`\`\`python
+c_kv = kv_down(x)      # 7168 维 -> 512 维：存进缓存的就是它
+kv   = kv_up(c_kv)     # 512 维 -> 128 个 head 各自的 k 和 v
+\`\`\`
+
+- **\`x\`**：attention 的输入，也就是这个 token 在当前层做完 RMSNorm 后的向量。DeepSeek-V3 里每个 token 都是 7168 维，这就是模型的宽度（GPT-2 small 是 768，LLaMA 3 8B 是 4096）。
+- **\`kv_down\`**：一个权重为 7168 × 512 的线性层，把这个输入压缩成一个 512 维的向量 $c_{kv}$，叫作**潜向量（latent）**。它只有 token 本身宽度的 1/14。
+- **\`kv_up\`**：要用的时候，再从这 512 个数还原出所有 head 的 $k$ 和 $v$。
+
+缓存里只存 $c_{kv}$。每个 token、每一层：
+
+\`\`\`text
+MHA（128 组 k、v）：   32,768 个数   # 假设：DeepSeek-V3 改用 MHA
+GQA（8 组 k、v）：      2,048 个数   # 假设：DeepSeek-V3 改用 8 组的 GQA
+MLA（潜向量）：           512 个数   （另外还有 64 个用来放位置信息，见解耦的 RoPE）
+\`\`\`
+
+加上放位置信息的 64 个数，MLA 每层存 576 个，约为 32,768 的 1/57。和 GPT-2、GPT-3、LLaMA 3、Mistral 放在一起的比较，见[各模型的 attention 对比](#info:attention_compare_notes)。
+
+## 4. 为什么能压缩
+
+\`kv_up\` 是一个固定的线性层，所以所有 head 的 $k$、$v$ 都是同一个 512 维向量的不同线性组合。它们加起来虽然有 32,768 个数，真正独立的信息最多只有 512 维。这样的矩阵叫作**低秩**（low-rank）。
+
+MLA 赌的是：$k$ 和 $v$ 真正需要的信息，512 维就装得下。DeepSeek-V2 的对比实验里，MLA 的效果和 MHA 持平甚至略好，缓存却只有 MHA 的一个零头。
+
+## 参考资料
+
+1. **DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model (2024).** 提出 MLA。[DeepSeek-V2 ↗](https://arxiv.org/abs/2405.04434)
+2. **DeepSeek-V3 Technical Report (2024).** MLA：512 维的 KV 潜向量，128 个 head。[DeepSeek-V3 ↗](https://arxiv.org/abs/2412.19437)
+`,
+    },
+  },
+
+  attention_compare_notes: {
+    en: {
+      title: "Attention across the models",
+      md: `
+**The attention of the five models on this site, side by side. They all compute the same thing, softmax of $q \\cdot k$ weighting the $v$'s. What differs is how many $k$/$v$ heads there are, how position gets in, which tokens each token may see, and therefore how big the [KV cache](#info:kv_cache_notes) is.**
+
+## 1. Heads
+
+| Model | Attention | Query heads | k/v heads | Head dim |
+|---|---|---|---|---|
+| GPT-2 small | MHA | 12 | 12 | 64 |
+| GPT-3 175B | MHA | 96 | 96 | 128 |
+| LLaMA 3 8B | [GQA](#info:gqa_notes) | 32 | 8 | 128 |
+| Mistral 7B | GQA + [sliding window](#info:sliding_window_notes) | 32 | 8 | 128 |
+| DeepSeek-V3 | [MLA](#info:mla_notes) | 128 | 128 | $q$, $k$: 192; $v$: 128 |
+
+- In LLaMA 3 and Mistral, each $k$/$v$ head is shared by 4 query heads.
+- In DeepSeek-V3, the 128 $k$/$v$ heads are all rebuilt from one 512-dimension latent. A $q$ or $k$ head has 192 dimensions: 128 for content plus 64 that carry RoPE.
+- GPT-2 and GPT-3 have biases in the $q$/$k$/$v$ projections. The other three have none.
+
+## 2. Position and mask
+
+| Model | Position | Mask |
+|---|---|---|
+| GPT-2 small | learned vectors, added at the input | causal |
+| GPT-3 175B | same as GPT-2 | causal; every other layer local |
+| LLaMA 3 8B | [RoPE](#info:rope_notes) in every layer, base 500,000 | causal |
+| Mistral 7B | RoPE, base 10,000 | causal, last 4096 tokens |
+| DeepSeek-V3 | decoupled RoPE (64-d part) | causal |
+
+- GPT-3's local layers see only a band of recent tokens; the paper does not give its width.
+- DeepSeek-V3 rotates only a 64-dimension part of $q$ and $k$, and all heads share one rotated key.
+
+## 3. KV cache per token
+
+Counted in bf16 (2 bytes per number) for every model, so they can be compared. GPT-2 actually ran in fp32.
+
+Per layer, an MHA token stores $k$ and $v$, each with one vector per head:
+
+\`\`\`text
+numbers per layer = 2 × (k/v heads) × (head dim)
+\`\`\`
+
+| Model | Numbers per layer | Layers | All layers | Context |
+|---|---|---|---|---|
+| GPT-2 small | 2 × 12 × 64 = 1,536 | 12 | 36 KB | 1024 |
+| GPT-3 175B | 2 × 96 × 128 = 24,576 | 96 | 4.5 MB | 2048 |
+| LLaMA 3 8B | 2 × 8 × 128 = 2,048 | 32 | 128 KB | 8K |
+| Mistral 7B | 2 × 8 × 128 = 2,048 | 32 | 128 KB | 8K |
+| DeepSeek-V3 | 512 + 64 = 576 | 61 | 68.6 KB | 128K |
+
+Mistral keeps only the last 4096 tokens, so its total never exceeds 4096 × 128 KB = 512 MB. DeepSeek-V3's 576 are the 512-number latent plus the 64-number rotated key.
+
+The 32,768 in the [MLA note](#info:mla_notes) is not in this table because no real model has it. It is what DeepSeek-V3 would store if it used plain MHA with its 128 heads: 2 × 128 × 128 = 32,768 per layer, about 3.8 MB per token over 61 layers. MLA's 576 is about 1/57 of that.
+
+## 4. What changed at each step
+
+1. **GPT-2 → GPT-3.** The same attention, scaled up, plus local bands in half the layers. The cache grows with it, to 4.5 MB per token.
+2. **GPT-3 → LLaMA 3.** Two changes:
+   - Position moves from a vector added at the input to RoPE, which rotates $q$ and $k$ in every layer.
+   - The $k$/$v$ heads drop from as many as the query heads to 8 (GQA), so each layer's cache is 4 times smaller than with 32 sets.
+3. **LLaMA 3 → Mistral.** The same heads. Only the mask changes, adding a 4096-token window. The cache per token is the same, but a rolling buffer keeps only the last 4096 tokens, so the total has a ceiling.
+4. **LLaMA 3 → DeepSeek-V3.** A different idea: instead of sharing $k$ and $v$, compress them. The 7168-dimension input of each token is projected down to a 512-dimension latent, and only that is cached. All 128 heads keep their own $k$ and $v$, yet the cache per token is smaller than LLaMA 3 8B's. The price is that RoPE cannot be applied in the usual way, so 64 dimensions are set aside for position.
+
+## 5. Three ways to shrink the cache
+
+| Method | What it does | Price |
+|---|---|---|
+| GQA | heads share $k$ and $v$ | fewer distinct $k$/$v$ |
+| Sliding window | keep only recent tokens | far tokens reach it only layer by layer |
+| MLA | store $k$, $v$ compressed (low-rank) | extra projections; RoPE needs its own part |
+
+## References
+
+1. **Language Models are Unsupervised Multitask Learners (2019).** GPT-2. [GPT-2 ↗](https://cdn.openai.com/better-language-models/language_models_are_unsupervised_multitask_learners.pdf)
+2. **Language Models are Few-Shot Learners (2020).** GPT-3. [GPT-3 ↗](https://arxiv.org/abs/2005.14165)
+3. **The Llama 3 Herd of Models (2024).** [LLaMA 3 ↗](https://arxiv.org/abs/2407.21783)
+4. **Mistral 7B (2023).** [Mistral 7B ↗](https://arxiv.org/abs/2310.06825)
+5. **DeepSeek-V3 Technical Report (2024).** [DeepSeek-V3 ↗](https://arxiv.org/abs/2412.19437)
+`,
+    },
+    zh: {
+      title: "各模型的 attention 对比",
+      md: `
+**把本站五个模型的 attention 放在一起比。它们算的东西其实一样：用 $q \\cdot k$ 经过 softmax 得到权重，再对 $v$ 加权求和。区别在于 $k$、$v$ 有几个 head，位置信息从哪里进来，每个 token 能看到哪些 token，以及由此决定的 [KV cache](#info:kv_cache_notes) 有多大。**
+
+## 1. head
+
+| 模型 | attention | query head 数 | k/v head 数 | 每个 head 的维度 |
+|---|---|---|---|---|
+| GPT-2 small | MHA | 12 | 12 | 64 |
+| GPT-3 175B | MHA | 96 | 96 | 128 |
+| LLaMA 3 8B | [GQA](#info:gqa_notes) | 32 | 8 | 128 |
+| Mistral 7B | GQA + [滑动窗口](#info:sliding_window_notes) | 32 | 8 | 128 |
+| DeepSeek-V3 | [MLA](#info:mla_notes) | 128 | 128 | $q$、$k$：192；$v$：128 |
+
+- LLaMA 3 和 Mistral 里，每组 $k$、$v$ 由 4 个 query head 共用。
+- DeepSeek-V3 的 128 组 $k$、$v$ 都是从同一个 512 维潜向量还原出来的。$q$、$k$ 每个 head 192 维：128 维放内容，另外 64 维用来做 RoPE。
+- GPT-2 和 GPT-3 的 $q$、$k$、$v$ 投影带 bias，后面三个都没有。
+
+## 2. 位置信息和 mask
+
+| 模型 | 位置信息 | mask |
+|---|---|---|
+| GPT-2 small | 学出来的位置向量，输入层加一次 | causal |
+| GPT-3 175B | 和 GPT-2 一样 | causal；隔一层是局部的 |
+| LLaMA 3 8B | 每一层都用 [RoPE](#info:rope_notes)，base 500,000 | causal |
+| Mistral 7B | RoPE，base 10,000 | causal，只看最近 4096 个 |
+| DeepSeek-V3 | 解耦的 RoPE（64 维部分） | causal |
+
+- GPT-3 的局部层只看最近的一段 token，这一段有多宽，论文里没有写。
+- DeepSeek-V3 只旋转 $q$、$k$ 里 64 维的那一部分，而且所有 head 共用一个转过的 key。
+
+## 3. 每个 token 的 KV cache
+
+为了方便比较，一律按 bf16（每个数 2 字节）算。GPT-2 当年实际用的是 fp32。
+
+MHA 里，一个 token 在一层要存 $k$ 和 $v$，每个 head 各一个向量：
+
+\`\`\`text
+每层的数 = 2 × k/v head 数 × 每个 head 的维度
+\`\`\`
+
+| 模型 | 每层几个数 | 层数 | 所有层合计 | 上下文 |
+|---|---|---|---|---|
+| GPT-2 small | 2 × 12 × 64 = 1,536 | 12 | 36 KB | 1024 |
+| GPT-3 175B | 2 × 96 × 128 = 24,576 | 96 | 4.5 MB | 2048 |
+| LLaMA 3 8B | 2 × 8 × 128 = 2,048 | 32 | 128 KB | 8K |
+| Mistral 7B | 2 × 8 × 128 = 2,048 | 32 | 128 KB | 8K |
+| DeepSeek-V3 | 512 + 64 = 576 | 61 | 68.6 KB | 128K |
+
+Mistral 只留最近 4096 个 token，所以总量最多 4096 × 128 KB = 512 MB。DeepSeek-V3 的 576 是 512 个数的潜向量，加上 64 个数的那个转过的 key。
+
+[MLA note](#info:mla_notes) 里的 32,768 不在这张表里，因为它不属于任何真实的模型。它是一个假设：DeepSeek-V3 如果用普通的 MHA，128 个 head 每层要存 2 × 128 × 128 = 32,768 个数，61 层下来每个 token 约 3.8 MB。MLA 实际只存 576 个，大约是它的 1/57。
+
+## 4. 每一步改了什么
+
+1. **GPT-2 → GPT-3。** attention 本身没变，只是变大，另外一半的层加了局部带状的 mask。缓存跟着变大，每个 token 4.5 MB。
+2. **GPT-3 → LLaMA 3。** 改了两处：
+   - 位置信息不再是输入层加的一个向量，而是 RoPE，在每一层旋转 $q$ 和 $k$。
+   - $k$、$v$ 的 head 不再和 query head 一样多，只留 8 个（GQA）。和 32 组相比，每层的缓存小了 4 倍。
+3. **LLaMA 3 → Mistral。** head 完全一样，只是 mask 多了一个 4096 的窗口。每个 token 的缓存大小不变，但用循环缓冲区只留最近 4096 个 token，总量就有了上限。
+4. **LLaMA 3 → DeepSeek-V3。** 换了思路：不让 head 共用 $k$、$v$，而是把它们压缩。每个 token 7168 维的输入先投影成 512 维的潜向量，缓存里只存它。128 个 head 都保留了自己的 $k$、$v$，每个 token 的缓存却比 LLaMA 3 8B 还小。代价是 RoPE 没法照常用，只好另外留出 64 维放位置信息。
+
+## 5. 缩小缓存的三种办法
+
+| 办法 | 做法 | 代价 |
+|---|---|---|
+| GQA | 几个 head 共用一组 $k$、$v$ | 不同的 $k$、$v$ 变少了 |
+| 滑动窗口 | 不往太远看，要留的 token 就少了 | 远处的信息只能一层层间接传过来 |
+| MLA | 把 $k$、$v$ 压成低秩的形式存 | 多了投影计算，RoPE 也得单独处理 |
+
+## 参考资料
+
+1. **Language Models are Unsupervised Multitask Learners (2019).** GPT-2。[GPT-2 ↗](https://cdn.openai.com/better-language-models/language_models_are_unsupervised_multitask_learners.pdf)
+2. **Language Models are Few-Shot Learners (2020).** GPT-3。[GPT-3 ↗](https://arxiv.org/abs/2005.14165)
+3. **The Llama 3 Herd of Models (2024).** [LLaMA 3 ↗](https://arxiv.org/abs/2407.21783)
+4. **Mistral 7B (2023).** [Mistral 7B ↗](https://arxiv.org/abs/2310.06825)
+5. **DeepSeek-V3 Technical Report (2024).** [DeepSeek-V3 ↗](https://arxiv.org/abs/2412.19437)
 `,
     },
   },

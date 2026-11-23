@@ -23,8 +23,12 @@ function Legend() {
 
 // One model's page: architecture diagram on the left, its code on the right, notes in a drawer.
 // Everything model-specific comes from the `model` config (see src/models/).
+// Attention blocks get a link to the note that compares attention across all the models.
+const isAttention = (id) => id === "block_attn" || id.startsWith("attn_");
+const COMPARE = { en: "Compare attention across the models →", zh: "各模型的 attention 对比 →" };
+
 export default function ModelExplorer({ model }) {
-  const { close } = useInfo();
+  const { close, open, lang } = useInfo();
   const [selectedId, setSelectedId] = useState(model.defaultSelected);
 
   const handleSelect = (id) => {
@@ -79,6 +83,12 @@ export default function ModelExplorer({ model }) {
             <p className="text-[11px] font-semibold uppercase tracking-wider text-indigo-600">Code</p>
             <h2 className="text-base font-semibold text-slate-900">{component.title}</h2>
             <p className="mt-0.5 text-sm text-slate-500">{component.summary}</p>
+            {isAttention(selectedId) && (
+              <button type="button" onClick={() => open("attention_compare_notes")}
+                className="mt-2 inline-flex items-center rounded-lg border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700 hover:border-indigo-300 hover:bg-indigo-100">
+                {COMPARE[lang] ?? COMPARE.en}
+              </button>
+            )}
           </div>
           {codeHtml ? (
             <div className="flex max-h-[75vh] min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-800 bg-[#0d1117] lg:max-h-none">

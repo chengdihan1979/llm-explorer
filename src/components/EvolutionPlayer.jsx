@@ -9,8 +9,8 @@ const HIGHLIGHT = "#F59E0B";
 const REMOVED = "#F43F5E";
 
 const UI = {
-  en: { step: "Step", play: "Play", pause: "Pause", prev: "Previous", next: "Next", replay: "Replay", note: "Read the note", page: "Open the page", steps: "All steps" },
-  zh: { step: "第", play: "播放", pause: "暂停", prev: "上一步", next: "下一步", replay: "重新播放", note: "看 note", page: "打开页面", steps: "全部步骤" },
+  en: { step: "Step", play: "Play", pause: "Pause", prev: "Previous", next: "Next", replay: "Replay", note: "Read the note", compare: "Compare across the models", page: "Open the page", steps: "All steps" },
+  zh: { step: "第", play: "播放", pause: "暂停", prev: "上一步", next: "下一步", replay: "重新播放", note: "看 note", compare: "各模型对比", page: "打开页面", steps: "全部步骤" },
 };
 
 function prefersReducedMotion() {
@@ -209,6 +209,9 @@ export default function EvolutionPlayer({ transition }) {
           <div className="mt-3 flex flex-wrap gap-2">
             {step.note && (
               <button type="button" className={linkBtn} onClick={() => open(step.note)}>{t.note} →</button>
+            )}
+            {step.compare && (
+              <button type="button" className={linkBtn} onClick={() => open(step.compare)}>{t.compare} →</button>
             )}
             {step.page && <a className={linkBtn} href={`#/${step.page}`}>{t.page} →</a>}
           </div>

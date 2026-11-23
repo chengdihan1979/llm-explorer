@@ -13,6 +13,7 @@ const TEXT = {
     intro: "Watch the GPT-2 diagram turn into newer models. Each step changes one component and explains why; open the notes for the details.",
     models: "Explore a model",
     open: "Diagram, code and notes →",
+    compare: "Compare across the models",
     subtitle: "Watch the architectures evolve · open any model to read its code and notes",
   },
   zh: {
@@ -21,6 +22,7 @@ const TEXT = {
     intro: "看 GPT-2 的架构图怎样一步步变成更新的模型。每一步只改一个组件，并说明为什么这样改；想看细节就打开对应的 note。",
     models: "逐个模型细看",
     open: "架构图、代码和 notes →",
+    compare: "各模型横向对比",
     subtitle: "看架构怎样演变 · 打开任意模型看代码和 notes",
   },
 };
@@ -33,9 +35,22 @@ const BLURB = {
   deepseek: { en: "DeepSeek-V3: multi-head latent attention, a mixture of 256 experts, multi-token prediction.", zh: "DeepSeek-V3：多头潜在注意力（MLA）、256 个专家的混合专家（MoE）、多 token 预测。" },
 };
 
+// Notes that put the same component of every model side by side.
+const COMPARISONS = [
+  {
+    note: "attention_compare_notes",
+    title: { en: "Attention", zh: "Attention" },
+    body: {
+      en: "MHA, GQA, sliding window and MLA: heads, position, mask and KV cache per token, from GPT-2 to DeepSeek-V3.",
+      zh: "MHA、GQA、滑动窗口和 MLA：从 GPT-2 到 DeepSeek-V3，head、位置信息、mask 和每个 token 的 KV cache。",
+    },
+    cta: { en: "Open the comparison →", zh: "打开对比 →" },
+  },
+];
+
 // The landing page: the architecture-evolution animation, then links to each model page.
 export default function HomePage() {
-  const { lang } = useInfo();
+  const { lang, open } = useInfo();
   const t = TEXT[lang] ?? TEXT.en;
   const [current, setCurrent] = useState(0);
   const transition = TRANSITIONS[current];
@@ -63,6 +78,18 @@ export default function HomePage() {
         )}
 
         <EvolutionPlayer key={transition.id} transition={transition} />
+
+        <h2 className="mb-3 mt-10 text-base font-semibold text-slate-900">{t.compare}</h2>
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {COMPARISONS.map((c) => (
+            <button key={c.note} type="button" onClick={() => open(c.note)}
+              className="group rounded-2xl border border-slate-200 bg-white p-5 text-left shadow-sm hover:border-indigo-300 hover:shadow">
+              <h3 className="text-[15px] font-semibold text-slate-900">{c.title[lang] ?? c.title.en}</h3>
+              <p className="mt-2 text-sm text-slate-600">{c.body[lang] ?? c.body.en}</p>
+              <p className="mt-3 text-xs font-medium text-indigo-600 group-hover:text-indigo-700">{c.cta[lang] ?? c.cta.en}</p>
+            </button>
+          ))}
+        </div>
 
         <h2 className="mb-3 mt-10 text-base font-semibold text-slate-900">{t.models}</h2>
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">

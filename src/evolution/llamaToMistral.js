@@ -26,6 +26,7 @@ const STEPS = [
     },
     highlight: ["attn_masked", "block_attn", "attn:title"],
     note: "sliding_window_notes",
+    compare: "attention_compare_notes",
   },
   {
     title: { en: "A rolling KV cache", zh: "循环使用的 KV cache" },
@@ -40,6 +41,7 @@ const STEPS = [
     },
     highlight: ["attn_kv_cache"],
     note: "sliding_window_notes",
+    compare: "attention_compare_notes",
   },
   {
     title: { en: "A smaller vocabulary", zh: "词表变小" },

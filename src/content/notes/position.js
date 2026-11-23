@@ -722,6 +722,8 @@ RoPE 是如何一步步工作的：[RoPE](#info:rope_notes)
       md: `
 **RoPE (Rotary Position Embedding) is how LLaMA and most LLMs today encode position. GPT-2 does not use it (it uses a [learned position embedding](#info:embedding_pos)). RoPE is easiest to understand at the $q \\cdot k$ step, because that is where it acts.**
 
+> 📊 How this compares with the other models on this site: [Attention across the models](#info:attention_compare_notes).
+
 ## 1. Where the position information goes
 
 **GPT-2: added to $x$ once, at the start.**
@@ -1126,6 +1128,8 @@ LLaMA 3 and LLaMA 3.1 come from the same paper, "The Llama 3 Herd of Models". Th
       title: "RoPE（旋转位置编码）",
       md: `
 **RoPE（Rotary Position Embedding，旋转位置编码）是 LLaMA 和今天大多数 LLM 编码位置的方式。GPT-2 没有用它（GPT-2 用的是[可学习的位置 embedding](#info:embedding_pos)）。RoPE 作用在 $q \\cdot k$ 这一步，所以放在这一步来理解最容易。**
+
+> 📊 和本站其他模型放在一起比：[各模型的 attention 对比](#info:attention_compare_notes)。
 
 ## 1. 位置信息放在哪里
 
