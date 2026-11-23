@@ -2,9 +2,10 @@ import gpt2 from "./gpt2";
 import gpt3 from "./gpt3";
 import llama from "./llama";
 import mistral from "./mistral";
+import deepseek from "./deepseek";
 
 // Models in the order they appear in the top navigation. Each page is reached at "#/<id>".
-export const MODELS = [gpt2, gpt3, llama, mistral];
+export const MODELS = [gpt2, gpt3, llama, mistral, deepseek];
 
 export const DEFAULT_MODEL_ID = "gpt2";
 

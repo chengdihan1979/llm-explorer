@@ -15,17 +15,18 @@ const STEPS = [
   ["attn_resid_dropout", "Residual dropout"],
 ];
 
-export default function AttnSubDiagram({ x, y, onClick, steps = STEPS }) {
+// `gap` is the distance between steps and `height` the frame height (defaults fit 8 steps).
+export default function AttnSubDiagram({ x, y, onClick, steps = STEPS, gap = 54, height = 480 }) {
   return (
     <g>
-      <rect x={x} y={y} width={220} height={480} rx={12} fill="#F8FAFC" stroke="#C7D2FE" strokeDasharray="5 4" />
+      <rect x={x} y={y} width={220} height={height} rx={12} fill="#F8FAFC" stroke="#C7D2FE" strokeDasharray="5 4" />
       <FrameTitle id="attn_class" label="Causal Self-Attention" x={x + 110} y={y + 24} onClick={onClick} />
       {steps.map(([id, label], i) => {
-        const top = y + 50 + i * 54;
+        const top = y + 50 + i * gap;
         return (
           <React.Fragment key={id}>
             <Node id={id} label={label} x={x + 20} y={top} w={180} h={28} onClick={onClick} />
-            {i < steps.length - 1 && <Arrow x1={x + 110} y1={top + 28} x2={x + 110} y2={top + 54} />}
+            {i < steps.length - 1 && <Arrow x1={x + 110} y1={top + 28} x2={x + 110} y2={top + gap} />}
           </React.Fragment>
         );
       })}

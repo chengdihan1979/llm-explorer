@@ -5,14 +5,14 @@ import { relabel, remove, replaceGroup, scene } from "./scene";
 
 // ---------- Sub-diagrams, laid out from a list so they can shrink and grow ----------
 
-// Attention steps stacked in a dashed frame at (600, 40).
-function attention(steps, title) {
+// Attention steps stacked in a dashed frame at (600, 40); `gap` is the distance between steps.
+export function attention(steps, title, gap = 54) {
   const els = [
-    { id: "attn:frame", type: "frame", x: 600, y: 40, w: 220, h: 102 + (steps.length - 1) * 54, dashed: true },
+    { id: "attn:frame", type: "frame", x: 600, y: 40, w: 220, h: 102 + (steps.length - 1) * gap, dashed: true },
     { id: "attn:title", type: "title", x: 710, y: 64, label: title },
   ];
   steps.forEach(([id, label], i) => {
-    els.push({ id, type: "node", x: 610, y: 90 + i * 54, w: 200, h: 28, label });
+    els.push({ id, type: "node", x: 610, y: 90 + i * gap, w: 200, h: 28, label });
     if (i > 0) els.push({ id: `attn:link:${steps[i - 1][0]}>${id}`, type: "link", from: steps[i - 1][0], to: id });
   });
   return els;

@@ -225,6 +225,9 @@ export function buildCodeHtml({ component, selectedId, noteOverrides = {} }) {
   // LLaMA's block: CausalSelfAttention(...) and MLP(...) jump to their code.
   html = html.replace(/= (CausalSelfAttention)(?=\((?:<\/mark>)?n_embd=n_embd, n_head=n_head, n_kv_head)/g, '= <span data-action="select:attn_class" style="text-decoration: underline; cursor: pointer;">$1</span>');
   html = html.replace(/= (MLP)(?=\(n_embd=n_embd, hidden=hidden\))/g, '= <span data-action="select:mlp_subdiagram" style="text-decoration: underline; cursor: pointer;">$1</span>');
+  // DeepSeek's block: CausalSelfAttention(C, ...), MoE(C, ...) and MLP(C, ...) jump to their code.
+  html = html.replace(/= (CausalSelfAttention)(?=\(C, cfg)/g, '= <span data-action="select:attn_class" style="text-decoration: underline; cursor: pointer;">$1</span>');
+  html = html.replace(/= (MoE|MLP)(?=\(C, cfg)/g, '= <span data-action="select:mlp_subdiagram" style="text-decoration: underline; cursor: pointer;">$1</span>');
   // LLaMA's MLP class (GPT-2 has a class with the same name, so only when the code is the gated one).
   if (component.code.includes("gate_proj")) html = html.replace(/class\s+(MLP)(?=\(nn\.Module\))/g, 'class <span data-action="open:swiglu_notes" style="text-decoration: underline; cursor: pointer;">$1</span>');
 
