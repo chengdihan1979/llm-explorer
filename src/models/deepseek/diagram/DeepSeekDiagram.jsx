@@ -42,6 +42,7 @@ export default function DeepSeekDiagram({ onSelect }) {
 
       <Arrow x1={210} y1={660} x2={210} y2={700} />
       <Node id="lm_head" label="LM Head (Linear, not tied)" x={20} y={700} w={380} h={40} onClick={onSelect} />
+      <Node id="generate" label="Generate (KV cache)" x={415} y={700} w={175} h={40} onClick={onSelect} />
 
       <Arrow x1={210} y1={740} x2={210} y2={780} />
       <Node id="loss_fn" label="Training Objective (CrossEntropyLoss)" x={20} y={780} w={380} h={40} onClick={onSelect} />

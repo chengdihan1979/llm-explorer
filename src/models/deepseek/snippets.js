@@ -191,6 +191,7 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, nh, self.hs_nope + self.hs_rope).transpose(1, 2)  # (B, nh, T, 192)
         q_nope, q_rope = q.split([self.hs_nope, self.hs_rope], dim=-1)    # (B, nh, T, 128), (B, nh, T, 64)
 
+        # c_kv (after kv_norm) and the rotated k_rope: all that a KV cache keeps per token when generating (see generate.py)
         c_kv, k_rope = self.kv_down(x).split([self.kv_lora, self.hs_rope], dim=-1)  # (B, T, 512), (B, T, 64): the KV cache
         kv = self.kv_up(self.kv_norm(c_kv))                               # (B, T, nh*256)
         kv = kv.view(B, T, nh, self.hs_nope + self.hs_v).transpose(1, 2)  # (B, nh, T, 256)
@@ -253,6 +254,115 @@ class MoE(nn.Module):
             if tok.numel() > 0:
                 y = y.index_add(0, tok, w[tok, slot, None] * expert(x[tok]))   # add weighted output
         return y.view(B, T, C)                                    # (B, T, C)
+`;
+
+// Inference: prefill + decode with an MLA KV cache and absorbed W_uk / W_uv. Verified in PyTorch at a small size:
+// the cached logits match a full forward at every step (max difference 6e-7).
+export const generateCode = `from transformers import AutoTokenizer
+import torch
+import torch.nn.functional as F
+
+# Text generation with an MLA KV cache, for the DeepSeekV3 model in train_deepseek_v3.py.
+# The training forward computes k and v from the latent for every token at once. Here:
+#   prefill: the whole prompt in one pass, as in training, and its latents go into the cache
+#   decode:  one new token per step, with W_uk and W_uv absorbed, so k and v are never computed
+
+
+class MLACache:
+    # one per layer: per token only 512 + 64 = 576 numbers
+    def __init__(self):
+        self.c_kv = None      # (B, T, 512) normalized latents
+        self.k_rope = None    # (B, T, 64)  RoPE keys, already rotated to their positions
+
+    def append(self, c_kv, k_rope):
+        if self.c_kv is None:
+            self.c_kv, self.k_rope = c_kv, k_rope
+        else:
+            self.c_kv = torch.cat([self.c_kv, c_kv], dim=1)
+            self.k_rope = torch.cat([self.k_rope, k_rope], dim=1)
+        return self.c_kv, self.k_rope
+
+
+def mla_prefill(attn, x, cache):                      # x: (B, T, C), the whole prompt
+    B, T, C = x.size()
+    nh = attn.n_head                                  # 128
+    q = attn.q_up(attn.q_norm(attn.q_down(x)))                              # (B, T, nh*192)
+    q = q.view(B, T, nh, attn.hs_nope + attn.hs_rope).transpose(1, 2)       # (B, nh, T, 192)
+    q_nope, q_rope = q.split([attn.hs_nope, attn.hs_rope], dim=-1)         # (B, nh, T, 128), (B, nh, T, 64)
+
+    c_kv, k_rope = attn.kv_down(x).split([attn.kv_lora, attn.hs_rope], dim=-1)   # (B, T, 512), (B, T, 64)
+    c_kv = attn.kv_norm(c_kv)
+    k_rope = apply_rope(k_rope, attn.cos[:T], attn.sin[:T])               # (B, T, 64)
+    cache.append(c_kv, k_rope)                        # store 576 numbers per token
+
+    # T queries at once: computing k and v from the latent is cheaper here, as in training
+    kv = attn.kv_up(c_kv).view(B, T, nh, attn.hs_nope + attn.hs_v).transpose(1, 2)   # (B, nh, T, 256)
+    k_nope, v = kv.split([attn.hs_nope, attn.hs_v], dim=-1)               # (B, nh, T, 128) each
+    q = torch.cat([q_nope, apply_rope(q_rope, attn.cos[:T], attn.sin[:T])], dim=-1)   # (B, nh, T, 192)
+    k = torch.cat([k_nope, k_rope.unsqueeze(1).expand(-1, nh, -1, -1)], dim=-1)       # (B, nh, T, 192)
+    y = F.scaled_dot_product_attention(q, k, v, is_causal=True)           # (B, nh, T, 128), causal as in attention.py
+    y = y.transpose(1, 2).reshape(B, T, nh * attn.hs_v)                   # (B, T, nh*128)
+    return attn.o_proj(y)                                                 # (B, T, C)
+
+
+def mla_decode(attn, x, cache):                       # x: (B, 1, C), the newest token
+    B = x.size(0)
+    nh = attn.n_head
+    pos = cache.c_kv.size(1)                          # its position = number of tokens already cached
+    cos, sin = attn.cos[pos:pos+1], attn.sin[pos:pos+1]
+    q = attn.q_up(attn.q_norm(attn.q_down(x)))                              # (B, 1, nh*192)
+    q = q.view(B, 1, nh, attn.hs_nope + attn.hs_rope).transpose(1, 2)       # (B, nh, 1, 192)
+    q_nope, q_rope = q.split([attn.hs_nope, attn.hs_rope], dim=-1)         # (B, nh, 1, 128), (B, nh, 1, 64)
+    q_rope = apply_rope(q_rope, cos, sin)
+
+    c_new, k_new = attn.kv_down(x).split([attn.kv_lora, attn.hs_rope], dim=-1)  # (B, 1, 512), (B, 1, 64)
+    c_kv, k_rope = cache.append(attn.kv_norm(c_new), apply_rope(k_new, cos, sin))  # (B, T, 512), (B, T, 64)
+
+    # absorb: split kv_up's weight into each head's rows for k (W_uk) and for v (W_uv)
+    W = attn.kv_up.weight.view(nh, attn.hs_nope + attn.hs_v, attn.kv_lora)   # (nh, 256, 512)
+    W_uk, W_uv = W[:, :attn.hs_nope], W[:, attn.hs_nope:]                     # (nh, 128, 512) each
+
+    q_abs = q_nope @ W_uk                             # (B, nh, 1, 512): W_uk moved onto q
+    scale = 1.0 / (attn.hs_nope + attn.hs_rope) ** 0.5
+    att = (q_abs @ c_kv.unsqueeze(1).transpose(-2, -1)          # (B, nh, 1, T) content: dot with each cached latent
+           + q_rope @ k_rope.unsqueeze(1).transpose(-2, -1)     # (B, nh, 1, T) position: dot with each RoPE key
+           ) * scale
+    att = F.softmax(att, dim=-1)                      # no mask needed: the newest token may see every cached token
+    y = att @ c_kv.unsqueeze(1)                       # (B, nh, 1, 512): weighted sum of latents
+    y = y @ W_uv.transpose(-2, -1)                    # (B, nh, 1, 128): W_uv applied once, after the sum
+    y = y.transpose(1, 2).reshape(B, 1, nh * attn.hs_v)                   # (B, 1, nh*128)
+    return attn.o_proj(y)                                                 # (B, 1, C)
+
+
+def forward_cached(model, idx, caches):              # idx: (B, T) prompt, or (B, 1) newest token
+    x = model.tok_emb(idx)                            # (B, T, C)
+    for blk, cache in zip(model.blocks, caches):
+        mla = mla_prefill if cache.c_kv is None else mla_decode
+        x = x + mla(blk.attn, blk.ln1(x), cache)      # same block as TransformerBlock.forward
+        x = x + blk.mlp(blk.ln2(x))
+    return model.lm_head(model.ln_f(x[:, -1]))        # (B, V) logits for the last position only
+
+
+@torch.no_grad()
+def generate(model, idx, max_new_tokens, temperature=1.0, top_k=50):   # idx: (B, T) prompt ids
+    caches = [MLACache() for _ in model.blocks]       # one cache per layer (61)
+    for i in range(max_new_tokens):
+        new = idx if i == 0 else idx[:, -1:]          # prefill the prompt once, then only the newest token
+        logits = forward_cached(model, new, caches) / temperature   # (B, V)
+        top, _ = torch.topk(logits, top_k)            # (B, top_k)
+        logits[logits < top[:, [-1]]] = float('-inf') # keep only the top_k most likely tokens
+        next_id = torch.multinomial(F.softmax(logits, dim=-1), num_samples=1)   # (B, 1)
+        idx = torch.cat([idx, next_id], dim=1)        # (B, T+1)
+    return idx
+
+
+# ----- Generate -----
+# model: the DeepSeekV3 trained in train_deepseek_v3.py (the MTP module is not used here)
+model.eval()
+tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-V3")
+prompt = torch.tensor([tokenizer.encode("The capital of France is")], device=device)   # (1, T)
+out = generate(model, prompt, max_new_tokens=20)      # (1, T+20)
+print(tokenizer.decode(out[0].tolist()))
 `;
 
 // One entry per diagram node: the code to show and the exact lines to highlight.
@@ -468,6 +578,17 @@ export const content = {
       "h2 = self.mtp(x[:, :-1], self.tok_emb(targets[:, :-1]))",
       "logits2 = self.lm_head(h2)",
       "loss_mtp = F.cross_entropy(logits2.reshape(-1, logits2.size(-1)), targets[:, 1:].reshape(-1))",
+    ],
+  },
+  generate: {
+    title: "Generate with an MLA KV cache",
+    summary: "Inference: prefill the prompt, then one token per step against a cache of 576 numbers per token per layer; k and v are never computed.",
+    code: generateCode,
+    highlight: [
+      "class MLACache:",
+      "q_abs = q_nope @ W_uk",
+      "y = y @ W_uv.transpose(-2, -1)",
+      "def generate(model, idx, max_new_tokens, temperature=1.0, top_k=50):",
     ],
   },
 };

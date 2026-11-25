@@ -3991,13 +3991,13 @@ Mistral 没有详细解释原因，比较普遍的看法是：
     en: {
       title: "Multi-head latent attention (MLA)",
       md: `
-**🆕 Multi-head latent attention (MLA), from DeepSeek-V2 and used in DeepSeek-V3, shrinks the [KV cache](#info:kv_cache_notes) without making heads share $k$ and $v$. Each head keeps its own $k$ and $v$, but the cache stores only a small compressed vector per token, and the $k$ and $v$ of all heads are rebuilt from it.**
+**🆕 Multi-head latent attention (MLA) was introduced in DeepSeek-V2 and is used again in DeepSeek-V3. Like GQA, it shrinks the [KV cache](#info:kv_cache_notes), but not by making heads share $k$ and $v$. Every head keeps its own $k$ and $v$; the cache just stores one small compressed vector per token, and the $k$ and $v$ of all heads are computed from it.**
 
 > 📊 How this compares with the other models on this site: [Attention across the models](#info:attention_compare_notes).
 
-## 1. The problem: the KV cache
+## 1. The problem: a huge KV cache
 
-When generating, every token stores its $k$ and $v$ in every layer. DeepSeek-V3 has 128 heads of 128 dimensions. If it used ordinary multi-head attention (MHA), which it does not, one token in one layer would store:
+When generating text, every token stores its $k$ and $v$ in every layer. DeepSeek-V3 has 128 heads of 128 dimensions. If it used ordinary multi-head attention (MHA), one token in one layer would store:
 
 \`\`\`text
 k: 128 heads × 128 = 16,384 numbers
@@ -4009,38 +4009,142 @@ Over 61 layers at 2 bytes per number, that is about **3.8 MB per token**, and cl
 
 ## 2. GQA's answer: share k and v between heads
 
-[GQA](#info:gqa_notes), as in LLaMA 3, lets several query heads share one $k$ and $v$. Keeping 8 groups would make the cache 16 times smaller.
+[GQA](#info:gqa_notes), used by LLaMA 3, lets several query heads share one $k$ and $v$. Keeping 8 groups for 128 heads would make the cache 16 times smaller.
 
-The price is that heads can no longer have their own $k$ and $v$. The more they share, the closer the model gets to MQA (a single $k$ and $v$ for all heads), and quality drops.
+The price is that heads no longer have their own $k$ and $v$. The more they share, the closer the model gets to MQA, where all heads share a single $k$ and $v$, and the worse the quality.
 
 ## 3. MLA's answer: compress instead of share
 
-MLA keeps a separate $k$ and $v$ for each of the 128 heads, but does not cache them. It caches a small compressed version:
+MLA keeps a separate $k$ and $v$ for each of the 128 heads, but does not cache them. It caches a small compressed vector instead:
 
 \`\`\`python
 c_kv = kv_down(x)      # 7168 -> 512: this is what goes into the cache
 kv   = kv_up(c_kv)     # 512 -> k and v for each of the 128 heads
 \`\`\`
 
-- **\`x\`** is the attention input: the token's vector in this layer after RMSNorm. Every token in DeepSeek-V3 is a 7168-dimension vector, the model's width (GPT-2 small: 768, LLaMA 3 8B: 4096).
-- **\`kv_down\`** is a linear layer with a 7168 × 512 weight. It compresses that input into one 512-dimension vector $c_{kv}$, called the **latent**: 14 times narrower than the token itself.
-- **\`kv_up\`** rebuilds the $k$ and $v$ of every head from those 512 numbers when they are needed.
+- **\`x\`** is the attention input: the token's vector in this layer after RMSNorm. DeepSeek-V3's width is 7168, so every token is a 7168-dimension vector (GPT-2 small: 768, LLaMA 3 8B: 4096).
+- **\`kv_down\`** compresses $x$ into a 512-dimension vector $c_{kv}$, called the **latent**, 14 times narrower than the token.
+- **\`kv_up\`** computes the $k$ and $v$ of every head from those 512 numbers when they are needed.
 
-Only $c_{kv}$ is cached. Per token, per layer:
+The cache holds $c_{kv}$ plus 64 numbers for position (see section 5 and the decoupled RoPE). Per token, per layer:
 
 \`\`\`text
-MHA (128 sets of k, v):   32,768 numbers   # hypothetical: DeepSeek-V3 with MHA
-GQA (8 sets of k, v):      2,048 numbers   # hypothetical: DeepSeek-V3 with 8-group GQA
-MLA (the latent):            512 numbers   (plus 64 for position, see the decoupled RoPE)
+MHA (128 sets of k, v):    32,768 numbers   # hypothetical: DeepSeek-V3 with MHA
+GQA (8 sets of k, v):       2,048 numbers   # hypothetical: DeepSeek-V3 with 8-group GQA
+MLA:               512 + 64 = 576 numbers   # actual: the latent + position
 \`\`\`
 
-With the 64 position numbers, MLA stores 576 per layer, about 1/57 of 32,768. [Attention across the models](#info:attention_compare_notes) puts these numbers next to GPT-2, GPT-3, LLaMA 3 and Mistral.
+576 is about 1/57 of MHA, and far below GQA too.
 
 ## 4. Why compression can work
 
-\`kv_up\` is one fixed linear layer, so the $k$ and $v$ of all heads are different linear combinations of the same 512 numbers. Together they have 32,768 numbers, but at most 512 dimensions of independent information. Such a matrix is called **low-rank**.
+\`kv_up\` is one fixed linear layer, so the $k$ and $v$ of all heads are different linear combinations of the same 512 numbers. Together they have 32,768 numbers, but at most 512 dimensions of independent information. This is called **low-rank**.
 
 MLA bets that 512 dimensions are enough to hold what $k$ and $v$ really need. In DeepSeek-V2's ablations, MLA matched or slightly beat MHA in quality, with a small fraction of its cache.
+
+## 5. The shapes inside MLA
+
+Inside one layer's attention, a token passes through these sizes:
+
+| Vector | Size | Note |
+|---|---|---|
+| token vector $x$ | 7168 | the residual stream |
+| KV latent $c_{kv}$ | 512 | from \`kv_down\`, cached |
+| RoPE key $k_{rope}$ | 64 | from \`kv_down\`, cached, shared by all heads |
+| query latent | 1536 | $q$ is compressed too |
+| $q$, $k$ per head | 128 + 64 = 192 | content part + RoPE part |
+| $v$ per head | 128 | |
+| all head outputs, concatenated | 128 × 128 = 16,384 | |
+| after the output Linear | 7168 | added back to the residual stream |
+
+**\`kv_down\`** is really a 7168 → 576 Linear whose output is split into $c_{kv}$ (512) and $k_{rope}$ (64). Why position gets its own 64 numbers is the subject of the decoupled RoPE.
+
+**\`kv_up\`** is a 512 → 32,768 Linear, so its weight is 32,768 × 512. Its rows are divided between the heads, 256 each:
+
+\`\`\`text
+rows     0 –   255   -> head 0:   k (128) and v (128)
+rows   256 –   511   -> head 1
+...
+rows 32512 – 32767   -> head 127
+\`\`\`
+
+- All 128 heads read the same $c_{kv}$, but each uses its own 256 × 512 block of weights, so every head gets a different $k$ and $v$. In GQA, by contrast, the heads of a group use the very same $k$ and $v$.
+- Writing it as one big Linear just computes all heads in one matrix multiply, like GPT-2's \`c_attn\`.
+- A head's full $k$ is its 128 computed numbers plus the shared 64-number $k_{rope}$: 192 in all.
+- Each of the 61 layers has its own \`kv_down\` and \`kv_up\`, and its own $c_{kv}$, which is why every layer stores 576 numbers. \`kv_up\` has 512 × 32,768 ≈ 16.8M parameters per layer.
+
+The code names these sizes like this:
+
+| Name | Meaning | Size |
+|---|---|---|
+| \`hs_nope\` | head size, no position encoding: the part without RoPE | 128 |
+| \`hs_rope\` | head size of the RoPE part | 64 |
+| \`hs_v\` | head size of $v$ | 128 |
+
+DeepSeek's own code calls them \`qk_nope_head_dim\`, \`qk_rope_head_dim\` and \`v_head_dim\`.
+
+### Heads × head size does not have to equal the width
+
+In GPT-2 small, 12 heads × 64 = 768; in LLaMA 3 8B, 32 × 128 = 4096. Both equal the width, but only by convention: pick the width, then split it evenly between the heads (GPT-2's code computes the head size as \`n_embd // n_head\`).
+
+Attention itself does not require it. The width matters only at the two ends. On the way in, $W_q$, $W_k$ and $W_v$ can project the token to any size. On the way out, the output Linear projects the concatenated heads back to the width, so the result can be added to the residual stream.
+
+DeepSeek-V3 does not follow the convention: $q$ and $k$ are 128 × 192 = 24,576 wide, $v$ is 128 × 128 = 16,384, and neither is 7168. With MLA, extra heads cost nothing in the cache, which stays at 576 numbers per layer however many heads there are.
+
+## 6. At inference: absorb instead of rebuild
+
+When generating, the cache holds only $c_{kv}$. Taken literally, each new token would first compute $k$ for every cached token, then score:
+
+\`\`\`text
+k = W_uk · c        for every cached token and every head
+score = q · k
+\`\`\`
+
+$W_{uk}$ is the 128 rows of \`kv_up\` that compute this head's $k$, a 128 × 512 matrix. With 100,000 tokens in the cache, for one layer and one step, computing $k$ alone costs:
+
+\`\`\`text
+128 (size of k) × 512 (size of c)  =      65,536 multiplications per head per token
+× 128 heads                        =   8,388,608 per token
+× 100,000 tokens                   ≈ 839 billion
+\`\`\`
+
+The fix is to regroup the product and move $W_{uk}$ to the query side:
+
+\`\`\`text
+score = q · (W_uk · c)
+      = (W_ukᵀ · q) · c
+\`\`\`
+
+The result is exactly the same, but the work is different:
+
+1. Once per step, compute $q' = W_{uk}^\\top q$ for the new token, 512 numbers per head. That is 128 × 128 × 512 ≈ 8.4 million multiplications, however long the cache is.
+2. Dot $q'$ directly with each cached $c_{kv}$: 512 × 128 heads × 100,000 tokens ≈ 6.6 billion.
+
+$k$ is never computed at all. The same works for $v$: $W_{uv}$, the rows that compute $v$, can be merged into the output Linear. In effect, attention runs in the 512-dimension latent space.
+
+This relies on one thing: $W_{uk}$ must be the same fixed matrix for every position, so it can be moved to the other side as a whole. RoPE breaks that, which is why MLA needs the decoupled RoPE.
+
+## 7. Training and inference
+
+**The structure is the same.** In training, $k$ and $v$ are also compressed to 512 numbers and computed back from the latent. That is how the model learns to fit what they need into 512 dimensions. So MLA must be used from the start of training: a model trained with plain MHA cannot simply switch to MLA at inference. The same goes for the decoupled RoPE.
+
+**Absorbing is only for generation.** Whether it pays depends on how many queries there are:
+
+- **Generating:** 1 new query against $T$ cached keys. Without absorbing, the work is done for all $T$ keys; absorbing moves it to the single query.
+- **Training (and prefill, which processes the prompt):** the whole text at once, so $T$ queries against $T$ keys. Absorbing saves nothing on the projections, since it trades $T$ keys for $T$ queries, and it makes the $T \\times T$ part wider: dot products of 576 numbers instead of 192, and weighted sums of 512 instead of 128.
+
+Counting every multiplication in one layer:
+
+| | Compute $k$, $v$ | Absorb |
+|---|---|---|
+| Training, 4096 tokens | ≈ 756 billion | ≈ 2.4 trillion |
+| Generating 1 token, 100,000 cached | ≈ 1.68 trillion | ≈ 14 billion |
+
+The causal mask halves the $T \\times T$ part on both sides, so the ratios hold. Training and prefill therefore compute $k$ and $v$ and run ordinary attention with 192-dimension heads, which suits optimized kernels such as FlashAttention; generation absorbs. Training has no cache to save anyway. The DeepSeek page's \`generate.py\` (the "Generate (KV cache)" block in the diagram) does both: \`mla_prefill\` computes $k$ and $v$ for the prompt, and \`mla_decode\` absorbs.
+
+**Compressing q saves training memory.** Compressing $q$ into a 1536-dimension latent does nothing for the KV cache. The DeepSeek-V3 report says it reduces activation memory during training, the intermediate results kept for the backward pass.
+
+RL post-training also generates rollouts, which is inference, so the cache and absorbing are used there too.
 
 ## References
 
@@ -4051,13 +4155,13 @@ MLA bets that 512 dimensions are enough to hold what $k$ and $v$ really need. In
     zh: {
       title: "多头潜在注意力（MLA）",
       md: `
-**🆕 多头潜在注意力（multi-head latent attention，MLA）由 DeepSeek-V2 提出，DeepSeek-V3 也在用。它缩小 [KV cache](#info:kv_cache_notes) 的方式不是让 head 共用 $k$、$v$：每个 head 仍然有自己的 $k$ 和 $v$，但缓存里每个 token 只存一个很小的压缩向量，所有 head 的 $k$、$v$ 都从它还原出来。**
+**🆕 多头潜在注意力（multi-head latent attention，MLA）由 DeepSeek-V2 提出，DeepSeek-V3 沿用。它也是为了缩小 [KV cache](#info:kv_cache_notes)，但不像 GQA 那样让 head 共用 $k$、$v$：每个 head 仍然有自己的 $k$ 和 $v$，只是缓存里每个 token 只存一个很小的压缩向量，所有 head 的 $k$、$v$ 都从它算出来。**
 
 > 📊 和本站其他模型放在一起比：[各模型的 attention 对比](#info:attention_compare_notes)。
 
-## 1. 问题：KV cache
+## 1. 问题：KV cache 太大
 
-生成时，每个 token 在每一层都要把 $k$ 和 $v$ 存下来。DeepSeek-V3 有 128 个 head，每个 head 128 维。假设它用的是普通的多头注意力（MHA）（实际并没有），一个 token 在一层里要存：
+生成文本时，每个 token 在每一层都要把自己的 $k$ 和 $v$ 存下来。DeepSeek-V3 有 128 个 head，每个 head 128 维。假如它用普通的多头注意力（MHA），一个 token 在一层里要存：
 
 \`\`\`text
 k：128 个 head × 128 = 16,384 个数
@@ -4065,42 +4169,146 @@ v：128 个 head × 128 = 16,384 个数
 合计：                 32,768 个数
 \`\`\`
 
-乘上 61 层、每个数 2 字节，**每个 token 约 3.8 MB**；128K 的上下文就要将近 500 GB，根本放不下。
+再乘上 61 层、每个数 2 字节，**每个 token 约 3.8 MB**。128K 的上下文就要将近 500 GB，根本放不下。
 
 ## 2. GQA 的办法：让 head 共用 k、v
 
-LLaMA 3 用的 [GQA](#info:gqa_notes) 让几个 query head 共用一组 $k$、$v$。比如只留 8 组，缓存就小 16 倍。
+LLaMA 3 用的 [GQA](#info:gqa_notes) 让几个 query head 共用一组 $k$、$v$。128 个 head 如果只留 8 组，缓存就小 16 倍。
 
-代价是 head 之间不能各有各的 $k$、$v$ 了。共用得越多，就越接近所有 head 只有一组 $k$、$v$ 的 MQA，效果也会跟着变差。
+代价是 head 不能再各有各的 $k$、$v$。共用得越多，就越接近所有 head 只有一组 $k$、$v$ 的 MQA，效果也越差。
 
 ## 3. MLA 的办法：不共用，而是压缩
 
-MLA 让 128 个 head 仍然各有自己的 $k$ 和 $v$，但缓存里不存它们，只存一个很小的压缩版：
+MLA 让 128 个 head 都保留自己的 $k$ 和 $v$，但缓存里不存它们，只存一个压缩后的小向量：
 
 \`\`\`python
 c_kv = kv_down(x)      # 7168 维 -> 512 维：存进缓存的就是它
 kv   = kv_up(c_kv)     # 512 维 -> 128 个 head 各自的 k 和 v
 \`\`\`
 
-- **\`x\`**：attention 的输入，也就是这个 token 在当前层做完 RMSNorm 后的向量。DeepSeek-V3 里每个 token 都是 7168 维，这就是模型的宽度（GPT-2 small 是 768，LLaMA 3 8B 是 4096）。
-- **\`kv_down\`**：一个权重为 7168 × 512 的线性层，把这个输入压缩成一个 512 维的向量 $c_{kv}$，叫作**潜向量（latent）**。它只有 token 本身宽度的 1/14。
-- **\`kv_up\`**：要用的时候，再从这 512 个数还原出所有 head 的 $k$ 和 $v$。
+- **\`x\`**：attention 的输入，也就是这个 token 在当前层做完 RMSNorm 后的向量。DeepSeek-V3 的模型宽度是 7168，所以每个 token 都是 7168 维（GPT-2 small 是 768，LLaMA 3 8B 是 4096）。
+- **\`kv_down\`**：把 $x$ 压缩成 512 维的向量 $c_{kv}$，叫作**潜向量（latent）**，只有 token 宽度的 1/14。
+- **\`kv_up\`**：需要的时候，从这 512 个数算出所有 head 的 $k$ 和 $v$。
 
-缓存里只存 $c_{kv}$。每个 token、每一层：
+缓存里只存 $c_{kv}$，外加 64 个放位置信息的数（第 5 节和解耦的 RoPE 会讲）。每个 token、每一层存多少个数：
 
 \`\`\`text
 MHA（128 组 k、v）：   32,768 个数   # 假设：DeepSeek-V3 改用 MHA
 GQA（8 组 k、v）：      2,048 个数   # 假设：DeepSeek-V3 改用 8 组的 GQA
-MLA（潜向量）：           512 个数   （另外还有 64 个用来放位置信息，见解耦的 RoPE）
+MLA：             512 + 64 = 576 个数   # 实际：潜向量 + 位置信息
 \`\`\`
 
-加上放位置信息的 64 个数，MLA 每层存 576 个，约为 32,768 的 1/57。和 GPT-2、GPT-3、LLaMA 3、Mistral 放在一起的比较，见[各模型的 attention 对比](#info:attention_compare_notes)。
+576 大约是 MHA 的 1/57，比 GQA 也小得多。
 
 ## 4. 为什么能压缩
 
-\`kv_up\` 是一个固定的线性层，所以所有 head 的 $k$、$v$ 都是同一个 512 维向量的不同线性组合。它们加起来虽然有 32,768 个数，真正独立的信息最多只有 512 维。这样的矩阵叫作**低秩**（low-rank）。
+\`kv_up\` 是一个固定的线性层，所以所有 head 的 $k$、$v$ 都是同一个 512 维向量的不同线性组合。它们加起来有 32,768 个数，但真正独立的信息最多只有 512 维。这种情况叫作**低秩**（low-rank）。
 
 MLA 赌的是：$k$ 和 $v$ 真正需要的信息，512 维就装得下。DeepSeek-V2 的对比实验里，MLA 的效果和 MHA 持平甚至略好，缓存却只有 MHA 的一个零头。
+
+## 5. MLA 里各个向量的形状
+
+一个 token 在一层 attention 里会经过这些宽度：
+
+| 向量 | 维度 | 说明 |
+|---|---|---|
+| token 向量 $x$ | 7168 | 残差流的宽度 |
+| KV 潜向量 $c_{kv}$ | 512 | \`kv_down\` 算出，存进缓存 |
+| RoPE key $k_{rope}$ | 64 | \`kv_down\` 算出，存进缓存，所有 head 共用 |
+| query 潜向量 | 1536 | $q$ 也压缩了一次 |
+| 每个 head 的 $q$、$k$ | 128 + 64 = 192 | 内容部分 + RoPE 部分 |
+| 每个 head 的 $v$ | 128 | |
+| 所有 head 的输出拼起来 | 128 × 128 = 16,384 | |
+| 输出 Linear 之后 | 7168 | 加回残差流 |
+
+**\`kv_down\`** 实际上是一个 7168 → 576 的 Linear，输出切成两段：$c_{kv}$（512）和 $k_{rope}$（64）。位置信息为什么要单独占 64 个数，是解耦 RoPE 要讲的事。
+
+**\`kv_up\`** 是一个 512 → 32,768 的 Linear，权重形状是 32,768 × 512。权重的行按 head 分，每个 head 256 行：
+
+\`\`\`text
+第     0 ~   255 行   -> head 0：  k（128）和 v（128）
+第   256 ~   511 行   -> head 1
+...
+第 32512 ~ 32767 行   -> head 127
+\`\`\`
+
+- 128 个 head 读的都是同一个 $c_{kv}$，但各自用一块 256 × 512 的权重，所以每个 head 的 $k$、$v$ 都不一样。GQA 则不同，同一组的 head 用的是同一份 $k$、$v$。
+- 写成一个大 Linear，只是为了一次矩阵乘法算完所有 head，和 GPT-2 的 \`c_attn\` 一个道理。
+- 每个 head 完整的 $k$，是算出来的 128 维加上共用的 64 维 $k_{rope}$，一共 192 维。
+- 61 层各有自己的 \`kv_down\` 和 \`kv_up\`，每层的 $c_{kv}$ 也各不相同。所以每一层都要存 576 个数。\`kv_up\` 每层有 512 × 32,768 ≈ 1,680 万个参数。
+
+代码里这几个维度的名字：
+
+| 名字 | 含义 | 维度 |
+|---|---|---|
+| \`hs_nope\` | head size, no position encoding：不做 RoPE 的那部分 | 128 |
+| \`hs_rope\` | 做 RoPE 的那部分 | 64 |
+| \`hs_v\` | $v$ 的 head size | 128 |
+
+DeepSeek 官方代码里分别叫 \`qk_nope_head_dim\`、\`qk_rope_head_dim\`、\`v_head_dim\`。
+
+### head 数 × head size 不一定等于宽度
+
+GPT-2 small 是 12 个 head × 64 = 768，LLaMA 3 8B 是 32 × 128 = 4096，都正好等于宽度。但这只是惯例：先定宽度，再平均分给各个 head（GPT-2 的代码里 head size 就是 \`n_embd // n_head\`）。
+
+attention 本身并不要求这样。宽度只在两头起作用：进来时，$W_q$、$W_k$、$W_v$ 可以把 token 投影成任意宽度；出去时，输出 Linear 把所有 head 拼起来的结果投影回宽度，才能加回残差流。
+
+DeepSeek-V3 就没有按惯例来：$q$、$k$ 是 128 × 192 = 24,576 维，$v$ 是 128 × 128 = 16,384 维，都不等于 7168。在 MLA 里多加 head 不占缓存，不管有多少个 head，每层都只存 576 个数。
+
+## 6. 推理时：吸收，而不是还原
+
+生成时缓存里只有 $c_{kv}$。照字面来做，每生成一个新 token，都要先算出缓存里每个 token 的 $k$，再打分：
+
+\`\`\`text
+k = W_uk · c        缓存里的每个 token、每个 head 都要算一次
+score = q · k
+\`\`\`
+
+$W_{uk}$ 是 \`kv_up\` 里属于这个 head、负责算 $k$ 的那 128 行，形状 128 × 512。假设缓存里有 10 万个 token，只算一层、一步，光是算 $k$ 就要：
+
+\`\`\`text
+128（k 的维度）× 512（c 的维度） =      65,536 次乘法（一个 head、一个 token）
+× 128 个 head                    =   8,388,608 次（一个 token）
+× 100,000 个 token               ≈ 8,390 亿次
+\`\`\`
+
+解决办法是换个结合方式，把 $W_{uk}$ 挪到 query 这一边：
+
+\`\`\`text
+score = q · (W_uk · c)
+      = (W_ukᵀ · q) · c
+\`\`\`
+
+结果完全一样，但算法变了：
+
+1. 每一步只对新 token 算一次 $q' = W_{uk}^\\top q$，每个 head 得到 512 维。一共 128 × 128 × 512 ≈ 840 万次乘法，和缓存多长无关。
+2. 用 $q'$ 直接和缓存里每个 $c_{kv}$ 做点积：512 × 128 个 head × 100,000 个 token ≈ 66 亿次。
+
+这样 $k$ 从头到尾都不用算出来。$v$ 也一样：负责算 $v$ 的 $W_{uv}$ 可以并进输出 Linear。这相当于直接在 512 维的潜空间里做 attention。
+
+这个技巧有一个前提：$W_{uk}$ 对每个位置都是同一个固定矩阵，才能整个挪到另一边。RoPE 恰好破坏了这一点，所以 MLA 需要解耦的 RoPE。
+
+## 7. 训练和推理
+
+**结构是一样的。** 训练时，$k$、$v$ 也是先压到 512 维、再从潜向量算出来。模型正是在训练中学会把 $k$、$v$ 需要的信息装进这 512 维的。所以 MLA 必须从训练一开始就用，用普通 MHA 训练出来的模型，不能到推理时直接换成 MLA。解耦的 RoPE 也一样。
+
+**吸收只在生成时用。** 吸收划不划算，要看 query 有几个：
+
+- **生成时：** 1 个新 query 对 $T$ 个缓存的 key。不吸收就要对 $T$ 个 key 都算一遍；吸收后，这份工作挪到了唯一的那个 query 上。
+- **训练时（还有处理 prompt 的 prefill）：** 整段文本一起算，$T$ 个 query 对 $T$ 个 key。吸收省不下投影的工作，只是从 $T$ 个 key 换成 $T$ 个 query；反而让 $T \\times T$ 那部分变宽：点积从 192 维变成 576 维，加权求和从 128 维变成 512 维。
+
+一层里所有乘法加起来：
+
+| | 算出 $k$、$v$ | 吸收 |
+|---|---|---|
+| 训练，4096 个 token | 约 7,560 亿 | 约 2.4 万亿 |
+| 生成 1 个 token，缓存 10 万个 | 约 1.68 万亿 | 约 140 亿 |
+
+causal mask 会让 $T \\times T$ 那部分减半，但两边都减半，比例不变。所以训练和 prefill 时都把 $k$、$v$ 算出来，做每个 head 192 维的普通 attention，正好可以用 FlashAttention 这类现成的优化 kernel；到生成时才用吸收。何况训练时本来就没有缓存要省。DeepSeek 页面上的 \`generate.py\`（架构图里的 "Generate (KV cache)" 方块）两种都写了：\`mla_prefill\` 给 prompt 算出 $k$、$v$，\`mla_decode\` 用吸收。
+
+**q 的压缩是为训练省内存。** 把 $q$ 压成 1536 维的潜向量，对 KV cache 没有任何帮助。DeepSeek-V3 的报告说，这样做是为了减少训练时的激活内存，也就是反向传播要保留的那些中间结果。
+
+另外，RL 后训练要生成 rollout，那一步就是推理，所以缓存和吸收在那里也会用到。
 
 ## 参考资料
 
@@ -4128,6 +4336,7 @@ MLA 赌的是：$k$ 和 $v$ 真正需要的信息，512 维就装得下。DeepSe
 
 - In LLaMA 3 and Mistral, each $k$/$v$ head is shared by 4 query heads.
 - In DeepSeek-V3, the 128 $k$/$v$ heads are all rebuilt from one 512-dimension latent. A $q$ or $k$ head has 192 dimensions: 128 for content plus 64 that carry RoPE.
+- Query heads × head size equals the model width in the first four models, but that is only a convention. DeepSeek-V3 breaks it; see [MLA](#info:mla_notes), section 5.
 - GPT-2 and GPT-3 have biases in the $q$/$k$/$v$ projections. The other three have none.
 
 ## 2. Position and mask
@@ -4208,6 +4417,7 @@ The 32,768 in the [MLA note](#info:mla_notes) is not in this table because no re
 
 - LLaMA 3 和 Mistral 里，每组 $k$、$v$ 由 4 个 query head 共用。
 - DeepSeek-V3 的 128 组 $k$、$v$ 都是从同一个 512 维潜向量还原出来的。$q$、$k$ 每个 head 192 维：128 维放内容，另外 64 维用来做 RoPE。
+- 前四个模型里 query head 数 × head size 正好等于模型宽度，但这只是惯例。DeepSeek-V3 就不相等，见 [MLA](#info:mla_notes) 第 5 节。
 - GPT-2 和 GPT-3 的 $q$、$k$、$v$ 投影带 bias，后面三个都没有。
 
 ## 2. 位置信息和 mask

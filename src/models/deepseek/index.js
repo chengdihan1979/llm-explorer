@@ -1,5 +1,5 @@
 import DeepSeekDiagram from "./diagram/DeepSeekDiagram";
-import { attnCode, blockCode, content, deepseekTrainingCode, mlpCode } from "./snippets";
+import { attnCode, blockCode, content, deepseekTrainingCode, generateCode, mlpCode } from "./snippets";
 
 // DeepSeek-V3. Shared groups are relabeled through the diagram spec; 🆕 marks what changed compared with LLaMA.
 export default {
@@ -39,5 +39,6 @@ export default {
     [blockCode, "block.py"],
     [attnCode, "attention.py"],
     [mlpCode, "moe.py"],
+    [generateCode, "generate.py"],
   ]),
 };
