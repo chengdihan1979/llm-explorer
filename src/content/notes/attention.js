@@ -4026,7 +4026,7 @@ kv   = kv_up(c_kv)     # 512 -> k and v for each of the 128 heads
 - **\`kv_down\`** compresses $x$ into a 512-dimension vector $c_{kv}$, called the **latent**, 14 times narrower than the token.
 - **\`kv_up\`** computes the $k$ and $v$ of every head from those 512 numbers when they are needed.
 
-The cache holds $c_{kv}$ plus 64 numbers for position (see section 5 and the decoupled RoPE). Per token, per layer:
+The cache holds $c_{kv}$ plus 64 numbers for position (see section 7, decoupled RoPE). Per token, per layer:
 
 \`\`\`text
 MHA (128 sets of k, v):    32,768 numbers   # hypothetical: DeepSeek-V3 with MHA
@@ -4051,13 +4051,13 @@ Inside one layer's attention, a token passes through these sizes:
 | token vector $x$ | 7168 | the residual stream |
 | KV latent $c_{kv}$ | 512 | from \`kv_down\`, cached |
 | RoPE key $k_{rope}$ | 64 | from \`kv_down\`, cached, shared by all heads |
-| query latent | 1536 | $q$ is compressed too |
+| query latent | 1536 | $q$ is compressed too (section 8) |
 | $q$, $k$ per head | 128 + 64 = 192 | content part + RoPE part |
 | $v$ per head | 128 | |
 | all head outputs, concatenated | 128 × 128 = 16,384 | |
 | after the output Linear | 7168 | added back to the residual stream |
 
-**\`kv_down\`** is really a 7168 → 576 Linear whose output is split into $c_{kv}$ (512) and $k_{rope}$ (64). Why position gets its own 64 numbers is the subject of the decoupled RoPE.
+**\`kv_down\`** is really a 7168 → 576 Linear whose output is split into $c_{kv}$ (512) and $k_{rope}$ (64). Why position gets its own 64 numbers is explained in section 7.
 
 **\`kv_up\`** is a 512 → 32,768 Linear, so its weight is 32,768 × 512. Its rows are divided between the heads, 256 each:
 
@@ -4122,9 +4122,129 @@ The result is exactly the same, but the work is different:
 
 $k$ is never computed at all. The same works for $v$: $W_{uv}$, the rows that compute $v$, can be merged into the output Linear. In effect, attention runs in the 512-dimension latent space.
 
-This relies on one thing: $W_{uk}$ must be the same fixed matrix for every position, so it can be moved to the other side as a whole. RoPE breaks that, which is why MLA needs the decoupled RoPE.
+This relies on one thing: $W_{uk}$ must be the same fixed matrix for every position, so it can be moved to the other side as a whole. RoPE breaks that, which is why MLA needs the decoupled RoPE of section 7.
 
-## 7. Training and inference
+## 7. Decoupled RoPE
+
+### Why RoPE breaks absorbing
+
+[RoPE](#info:rope_notes) rotates $q$ and $k$ by their positions. Write the rotation at position $i$ as a matrix $R(i)$. When scoring, the two rotations combine and only the distance is left:
+
+\`\`\`text
+score = (R(i)·q) · (R(j)·k) = q · R(j−i) · k
+\`\`\`
+
+Now apply RoPE directly to MLA's $k = W_{uk} \\cdot c_j$:
+
+\`\`\`text
+score = q · R(j−i) · W_uk · c_j
+\`\`\`
+
+To absorb, the matrix between $q$ and $c_j$ has to move onto $q$ as a whole. But that matrix is now $R(j-i) \\cdot W_{uk}$, which changes with $j$:
+
+| | Matrix between $q$ and $c$ | How many $q'$ to compute |
+|---|---|---|
+| without RoPE | $W_{uk}$, the same for every position | 1, used for every cached token |
+| with RoPE | $R(j-i) \\cdot W_{uk}$, different for every position | $T$, one per cached token |
+
+$T$ different $q'$ cost about as much as computing every $k$, so the saving of section 6 is gone. Caching rotated $k$ instead would mean caching full $k$ again, 32,768 numbers per token per layer, and the compression would be gone too.
+
+### The fix: one part for content, one for position
+
+Each head's 192-dimension $q$ and $k$ are split in two:
+
+| Part | Size | RoPE? | Where $k$ comes from |
+|---|---|---|---|
+| content (nope) | 128 | no | computed from the latent $c_{kv}$ |
+| position (rope) | 64 | yes | computed straight from $x$, on its own path |
+
+A dot product can be split by dimensions, so the score is the sum of two terms:
+
+\`\`\`text
+score = q_nope · k_nope  +  q_rope · k_rope
+        content, 128 dims    position, 64 dims
+\`\`\`
+
+- **Content:** $k_{nope} = W_{uk} \\cdot c$ is never rotated, so $W_{uk}$ is the same for every position and can be absorbed as in section 6.
+- **Position:** $k_{rope}$ does not go through the latent. It is the extra 64 outputs of \`kv_down\`, rotated to its position and cached as it is. When generating, the new token's rotated $q_{rope}$ is dotted with the cached rotated $k_{rope}$ directly. There is no matrix in between, so there is nothing to absorb.
+
+\`\`\`python
+c_kv, k_rope = self.kv_down(x).split([self.kv_lora, self.hs_rope], dim=-1)   # 512, 64
+k_rope = apply_rope(k_rope.unsqueeze(1), self.cos[:T], self.sin[:T])          # rotated to its position
+\`\`\`
+
+### One rotated key for all heads
+
+- If every head had its own $k_{rope}$, each token would cache 128 × 64 = 8,192 more numbers, 16 times the latent itself.
+- With one $k_{rope}$ shared by all heads, it is only 64 more: 512 + 64 = 576 per token per layer.
+- Each head still has its own $q_{rope}$, so heads can still use position differently.
+
+It is the MQA idea, all heads sharing one key, used only for the 64 position dimensions.
+
+### In the code
+
+In the training forward (\`attention.py\`), the two parts are concatenated into 192 dimensions and scored with one ordinary dot product, which gives exactly the sum of the two terms. \`expand\` copies the shared $k_{rope}$ to all 128 heads, and the scale uses the full 192:
+
+\`\`\`python
+q = torch.cat([q_nope, q_rope], dim=-1)                                  # (B, nh, T, 192)
+k = torch.cat([k_nope, k_rope.expand(-1, nh, -1, -1)], dim=-1)           # (B, nh, T, 192)
+att = (q @ k.transpose(-2, -1)) * (1.0 / (self.hs_nope + self.hs_rope) ** 0.5)
+\`\`\`
+
+When generating (\`mla_decode\` in \`generate.py\`), the two terms are computed separately:
+
+\`\`\`python
+att = (q_abs @ c_kv.unsqueeze(1).transpose(-2, -1)          # content: absorbed, 512 dims
+       + q_rope @ k_rope.unsqueeze(1).transpose(-2, -1)     # position: ordinary dot product, 64 dims
+       ) * scale
+\`\`\`
+
+In short, position lives only in a small 64-dimension part that is never compressed. The content part can be compressed and absorbed; the position part uses RoPE as usual, for the price of 64 extra numbers per token.
+## 8. Compressing q
+
+$q$ is compressed the same way, down first, then up:
+
+\`\`\`python
+q = self.q_up(self.q_norm(self.q_down(x)))     # 7168 -> 1536 -> 128 × 192
+\`\`\`
+
+| Step | Size |
+|---|---|
+| $x$ | 7168 |
+| after \`q_down\`: the query latent | 1536 |
+| after \`q_norm\` | 1536 (RMSNorm, same shape) |
+| after \`q_up\`: $q$ for all 128 heads | 128 × 192 = 24,576 |
+
+The result is then split into each head's $q_{nope}$ (128) and $q_{rope}$ (64), as in section 7.
+
+**It does nothing for the KV cache.** $q$ is used only in the current step and is never cached, so this latent is used and thrown away.
+
+**Why compress it, then?**
+
+1. **Far fewer parameters.** The $q$ projection of one layer:
+
+| Projection | Parameters |
+|---|---|
+| directly, 7168 → 24,576 | about 176M |
+| 7168 → 1536 → 24,576 | 11M + 37.7M ≈ 48.8M |
+
+That is about 3.6 times fewer, or from about 10.7B to about 3.0B over the 61 layers.
+
+2. **Less activation memory in training.** This is the reason the DeepSeek-V2 paper gives. $q$ is very wide (24,576 numbers per token), and passing it through a 1536-number bottleneck shrinks the intermediate results that training keeps for the backward pass.
+
+As with $k$ and $v$ in section 4, two small matrices replace one 7168 × 24,576 matrix, so the product has rank at most 1536. The bet is that the $q$ of all 128 heads together need no more than 1536 dimensions.
+
+**The RMSNorm in the middle.** \`q_norm\`, like \`kv_norm\` on the $k$/$v$ side, normalizes the compressed latent so that its scale stays stable and training is steadier. Both norms are new in MLA; GPT-2 and LLaMA have no norm inside attention.
+
+With this, the whole MLA path is complete:
+
+\`\`\`text
+q:  x → q_down → q_norm → q_up → q_nope (128) + q_rope (64)
+k:  x → kv_down → c_kv (512) → kv_norm → kv_up → k_nope (128)
+         └─────→ k_rope (64), shared by all heads
+v:                c_kv (512) → kv_norm → kv_up → v (128)
+\`\`\`
+## 9. Training and inference
 
 **The structure is the same.** In training, $k$ and $v$ are also compressed to 512 numbers and computed back from the latent. That is how the model learns to fit what they need into 512 dimensions. So MLA must be used from the start of training: a model trained with plain MHA cannot simply switch to MLA at inference. The same goes for the decoupled RoPE.
 
@@ -4141,8 +4261,6 @@ Counting every multiplication in one layer:
 | Generating 1 token, 100,000 cached | ≈ 1.68 trillion | ≈ 14 billion |
 
 The causal mask halves the $T \\times T$ part on both sides, so the ratios hold. Training and prefill therefore compute $k$ and $v$ and run ordinary attention with 192-dimension heads, which suits optimized kernels such as FlashAttention; generation absorbs. Training has no cache to save anyway. The DeepSeek page's \`generate.py\` (the "Generate (KV cache)" block in the diagram) does both: \`mla_prefill\` computes $k$ and $v$ for the prompt, and \`mla_decode\` absorbs.
-
-**Compressing q saves training memory.** Compressing $q$ into a 1536-dimension latent does nothing for the KV cache. The DeepSeek-V3 report says it reduces activation memory during training, the intermediate results kept for the backward pass.
 
 RL post-training also generates rollouts, which is inference, so the cache and absorbing are used there too.
 
@@ -4190,7 +4308,7 @@ kv   = kv_up(c_kv)     # 512 维 -> 128 个 head 各自的 k 和 v
 - **\`kv_down\`**：把 $x$ 压缩成 512 维的向量 $c_{kv}$，叫作**潜向量（latent）**，只有 token 宽度的 1/14。
 - **\`kv_up\`**：需要的时候，从这 512 个数算出所有 head 的 $k$ 和 $v$。
 
-缓存里只存 $c_{kv}$，外加 64 个放位置信息的数（第 5 节和解耦的 RoPE 会讲）。每个 token、每一层存多少个数：
+缓存里只存 $c_{kv}$，外加 64 个放位置信息的数（第 7 节讲解耦的 RoPE 时再说）。每个 token、每一层存多少个数：
 
 \`\`\`text
 MHA（128 组 k、v）：   32,768 个数   # 假设：DeepSeek-V3 改用 MHA
@@ -4215,13 +4333,13 @@ MLA 赌的是：$k$ 和 $v$ 真正需要的信息，512 维就装得下。DeepSe
 | token 向量 $x$ | 7168 | 残差流的宽度 |
 | KV 潜向量 $c_{kv}$ | 512 | \`kv_down\` 算出，存进缓存 |
 | RoPE key $k_{rope}$ | 64 | \`kv_down\` 算出，存进缓存，所有 head 共用 |
-| query 潜向量 | 1536 | $q$ 也压缩了一次 |
+| query 潜向量 | 1536 | $q$ 也压缩了一次（第 8 节） |
 | 每个 head 的 $q$、$k$ | 128 + 64 = 192 | 内容部分 + RoPE 部分 |
 | 每个 head 的 $v$ | 128 | |
 | 所有 head 的输出拼起来 | 128 × 128 = 16,384 | |
 | 输出 Linear 之后 | 7168 | 加回残差流 |
 
-**\`kv_down\`** 实际上是一个 7168 → 576 的 Linear，输出切成两段：$c_{kv}$（512）和 $k_{rope}$（64）。位置信息为什么要单独占 64 个数，是解耦 RoPE 要讲的事。
+**\`kv_down\`** 实际上是一个 7168 → 576 的 Linear，输出切成两段：$c_{kv}$（512）和 $k_{rope}$（64）。位置信息为什么要单独占 64 个数，见第 7 节。
 
 **\`kv_up\`** 是一个 512 → 32,768 的 Linear，权重形状是 32,768 × 512。权重的行按 head 分，每个 head 256 行：
 
@@ -4286,9 +4404,129 @@ score = q · (W_uk · c)
 
 这样 $k$ 从头到尾都不用算出来。$v$ 也一样：负责算 $v$ 的 $W_{uv}$ 可以并进输出 Linear。这相当于直接在 512 维的潜空间里做 attention。
 
-这个技巧有一个前提：$W_{uk}$ 对每个位置都是同一个固定矩阵，才能整个挪到另一边。RoPE 恰好破坏了这一点，所以 MLA 需要解耦的 RoPE。
+这个技巧有一个前提：$W_{uk}$ 对每个位置都是同一个固定矩阵，才能整个挪到另一边。RoPE 恰好破坏了这一点，所以 MLA 需要第 7 节的解耦 RoPE。
 
-## 7. 训练和推理
+## 7. 解耦的 RoPE
+
+### RoPE 为什么会破坏吸收
+
+[RoPE](#info:rope_notes) 按位置旋转 $q$ 和 $k$。把位置 $i$ 的旋转写成矩阵 $R(i)$。打分时两个旋转合在一起，只剩下两者的距离：
+
+\`\`\`text
+score = (R(i)·q) · (R(j)·k) = q · R(j−i) · k
+\`\`\`
+
+如果直接对 MLA 的 $k = W_{uk} \\cdot c_j$ 做 RoPE：
+
+\`\`\`text
+score = q · R(j−i) · W_uk · c_j
+\`\`\`
+
+要吸收，就得把 $q$ 和 $c_j$ 中间的矩阵整个挪到 $q$ 上。可现在这个矩阵是 $R(j-i) \\cdot W_{uk}$，它跟着 $j$ 变：
+
+| | $q$ 和 $c$ 中间的矩阵 | 要算几个 $q'$ |
+|---|---|---|
+| 没有 RoPE | $W_{uk}$，所有位置都一样 | 1 个，所有缓存 token 共用 |
+| 有 RoPE | $R(j-i) \\cdot W_{uk}$，每个位置都不同 | $T$ 个，每个缓存 token 一个 |
+
+算 $T$ 个不同的 $q'$，花的功夫和把每个 $k$ 都算出来差不多，第 6 节省下的计算就全没了。改成缓存转好的 $k$ 也不行，那等于又把完整的 $k$ 存回去，每个 token 每层 32,768 个数，压缩也白做了。
+
+### 解决办法：内容一部分，位置一部分
+
+每个 head 192 维的 $q$ 和 $k$ 拆成两部分：
+
+| 部分 | 维度 | 做不做 RoPE | $k$ 从哪里来 |
+|---|---|---|---|
+| 内容（nope） | 128 | 不做 | 从潜向量 $c_{kv}$ 算出来 |
+| 位置（rope） | 64 | 做 | 直接从 $x$ 算，单独一路 |
+
+点积可以按维度拆开再相加，所以分数变成两项之和：
+
+\`\`\`text
+score = q_nope · k_nope  +  q_rope · k_rope
+        内容：128 维          位置：64 维
+\`\`\`
+
+- **内容部分：** $k_{nope} = W_{uk} \\cdot c$ 不旋转，$W_{uk}$ 对所有位置都一样，可以像第 6 节那样吸收。
+- **位置部分：** $k_{rope}$ 不经过潜向量，它是 \`kv_down\` 多输出的那 64 维，按位置转好以后原样存进缓存。生成时，新 token 转好的 $q_{rope}$ 直接和缓存里转好的 $k_{rope}$ 做点积，中间没有矩阵，也就谈不上吸收。
+
+\`\`\`python
+c_kv, k_rope = self.kv_down(x).split([self.kv_lora, self.hs_rope], dim=-1)   # 512, 64
+k_rope = apply_rope(k_rope.unsqueeze(1), self.cos[:T], self.sin[:T])          # 按位置旋转
+\`\`\`
+
+### 所有 head 共用一个转过的 key
+
+- 如果每个 head 都有自己的 $k_{rope}$，每个 token 要多存 128 × 64 = 8,192 个数，是潜向量本身的 16 倍。
+- 所有 head 共用一个 $k_{rope}$，只多存 64 个数：每个 token 每层 512 + 64 = 576。
+- $q_{rope}$ 仍然是每个 head 各有一个，所以不同 head 还是可以用不同方式利用位置。
+
+这其实就是 MQA 的思路：所有 head 共用一个 key，只不过只用在这 64 维的位置部分。
+
+### 代码里怎么写
+
+训练时的前向（\`attention.py\`）把两部分拼成 192 维，做一次普通的点积，结果和两项分别算再相加完全一样。\`expand\` 把共用的 $k_{rope}$ 复制给 128 个 head，缩放用的是总维度 192：
+
+\`\`\`python
+q = torch.cat([q_nope, q_rope], dim=-1)                                  # (B, nh, T, 192)
+k = torch.cat([k_nope, k_rope.expand(-1, nh, -1, -1)], dim=-1)           # (B, nh, T, 192)
+att = (q @ k.transpose(-2, -1)) * (1.0 / (self.hs_nope + self.hs_rope) ** 0.5)
+\`\`\`
+
+生成时（\`generate.py\` 里的 \`mla_decode\`），两项分开算：
+
+\`\`\`python
+att = (q_abs @ c_kv.unsqueeze(1).transpose(-2, -1)          # 内容：吸收，512 维
+       + q_rope @ k_rope.unsqueeze(1).transpose(-2, -1)     # 位置：普通点积，64 维
+       ) * scale
+\`\`\`
+
+总结一下：位置信息只放在一小块不压缩的 64 维里。内容部分可以压缩、可以吸收；位置部分照常用 RoPE，代价只是每个 token 多存 64 个数。
+## 8. q 的压缩
+
+$q$ 也用同样的办法，先压缩再展开：
+
+\`\`\`python
+q = self.q_up(self.q_norm(self.q_down(x)))     # 7168 -> 1536 -> 128 × 192
+\`\`\`
+
+| 步骤 | 维度 |
+|---|---|
+| $x$ | 7168 |
+| \`q_down\` 之后：q 的潜向量 | 1536 |
+| \`q_norm\` 之后 | 1536（RMSNorm，形状不变） |
+| \`q_up\` 之后：128 个 head 的 $q$ | 128 × 192 = 24,576 |
+
+最后再切成每个 head 的 $q_{nope}$（128）和 $q_{rope}$（64），后面就是第 7 节讲的内容。
+
+**它对 KV cache 没有帮助。** $q$ 只在当前这一步用，从来不进缓存，所以这个潜向量算完就扔了。
+
+**那为什么还要压缩？**
+
+1. **参数少得多。** 一层的 $q$ 投影：
+
+| 写法 | 参数量 |
+|---|---|
+| 直接 7168 → 24,576 | 约 1.76 亿 |
+| 7168 → 1536 → 24,576 | 1,100 万 + 3,770 万 ≈ 4,880 万 |
+
+少了约 3.6 倍。61 层合计，从约 107 亿降到约 30 亿。
+
+2. **训练时省激活内存。** 这是 DeepSeek-V2 论文给的理由。$q$ 很宽（每个 token 24,576 维），中间先过一道 1536 维的窄口，训练时为反向传播保存的中间结果也就跟着变小。
+
+和第 4 节讲的 $k$、$v$ 一样，原来一个 7168 × 24,576 的矩阵换成了两个小矩阵相乘，乘出来的秩最多是 1536。赌的是：128 个 head 的 $q$ 加在一起，1536 维的信息就够用。
+
+**中间那个 RMSNorm。** \`q_norm\` 和 $k$、$v$ 那边的 \`kv_norm\` 一样，是对压缩出来的潜向量做归一化，让它的尺度保持稳定，训练更稳。这两个 norm 都是 MLA 新加的，GPT-2 和 LLaMA 的 attention 里都没有 norm。
+
+到这里，MLA 的整条路径就齐了：
+
+\`\`\`text
+q：x → q_down → q_norm → q_up → q_nope (128) + q_rope (64)
+k：x → kv_down → c_kv (512) → kv_norm → kv_up → k_nope (128)
+        └─────→ k_rope (64)，所有 head 共用
+v：              c_kv (512) → kv_norm → kv_up → v (128)
+\`\`\`
+## 9. 训练和推理
 
 **结构是一样的。** 训练时，$k$、$v$ 也是先压到 512 维、再从潜向量算出来。模型正是在训练中学会把 $k$、$v$ 需要的信息装进这 512 维的。所以 MLA 必须从训练一开始就用，用普通 MHA 训练出来的模型，不能到推理时直接换成 MLA。解耦的 RoPE 也一样。
 
@@ -4305,8 +4543,6 @@ score = q · (W_uk · c)
 | 生成 1 个 token，缓存 10 万个 | 约 1.68 万亿 | 约 140 亿 |
 
 causal mask 会让 $T \\times T$ 那部分减半，但两边都减半，比例不变。所以训练和 prefill 时都把 $k$、$v$ 算出来，做每个 head 192 维的普通 attention，正好可以用 FlashAttention 这类现成的优化 kernel；到生成时才用吸收。何况训练时本来就没有缓存要省。DeepSeek 页面上的 \`generate.py\`（架构图里的 "Generate (KV cache)" 方块）两种都写了：\`mla_prefill\` 给 prompt 算出 $k$、$v$，\`mla_decode\` 用吸收。
-
-**q 的压缩是为训练省内存。** 把 $q$ 压成 1536 维的潜向量，对 KV cache 没有任何帮助。DeepSeek-V3 的报告说，这样做是为了减少训练时的激活内存，也就是反向传播要保留的那些中间结果。
 
 另外，RL 后训练要生成 rollout，那一步就是推理，所以缓存和吸收在那里也会用到。
 
@@ -4347,7 +4583,7 @@ causal mask 会让 $T \\times T$ 那部分减半，但两边都减半，比例�
 | GPT-3 175B | same as GPT-2 | causal; every other layer local |
 | LLaMA 3 8B | [RoPE](#info:rope_notes) in every layer, base 500,000 | causal |
 | Mistral 7B | RoPE, base 10,000 | causal, last 4096 tokens |
-| DeepSeek-V3 | decoupled RoPE (64-d part) | causal |
+| DeepSeek-V3 | [decoupled RoPE](#info:mla_notes) (64-d part) | causal |
 
 - GPT-3's local layers see only a band of recent tokens; the paper does not give its width.
 - DeepSeek-V3 rotates only a 64-dimension part of $q$ and $k$, and all heads share one rotated key.
@@ -4428,7 +4664,7 @@ The 32,768 in the [MLA note](#info:mla_notes) is not in this table because no re
 | GPT-3 175B | 和 GPT-2 一样 | causal；隔一层是局部的 |
 | LLaMA 3 8B | 每一层都用 [RoPE](#info:rope_notes)，base 500,000 | causal |
 | Mistral 7B | RoPE，base 10,000 | causal，只看最近 4096 个 |
-| DeepSeek-V3 | 解耦的 RoPE（64 维部分） | causal |
+| DeepSeek-V3 | [解耦的 RoPE](#info:mla_notes)（64 维部分） | causal |
 
 - GPT-3 的局部层只看最近的一段 token，这一段有多宽，论文里没有写。
 - DeepSeek-V3 只旋转 $q$、$k$ 里 64 维的那一部分，而且所有 head 共用一个转过的 key。

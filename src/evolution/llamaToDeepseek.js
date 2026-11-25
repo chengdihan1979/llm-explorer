@@ -81,7 +81,7 @@ const STEPS = [
     },
     change: (s) => relabel(s, { attn_rope: "Decoupled RoPE (64-d part)" }),
     highlight: ["attn_rope"],
-    note: "rope_notes",
+    note: "mla_notes",
     compare: "attention_compare_notes",
   },
   {

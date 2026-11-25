@@ -9,6 +9,8 @@ export default {
       md: `
 **\`fc_in\` is the first layer of the MLP. It turns each token's 768-dimensional vector into 3072 numbers, and each of those numbers measures how well the token matches one learned pattern.**
 
+> 🆕 In LLaMA, Mistral and DeepSeek this layer is \`up_proj\` (4096 → 14336 in LLaMA 3 8B). It is joined by a second projection, \`gate_proj\`, whose output decides how much of each of these numbers passes through instead of GELU: see [SwiGLU](#info:swiglu_notes).
+
 ## Where it sits
 
 \`\`\`python
@@ -97,6 +99,8 @@ Compared with attention, the MLP has about **twice** as many parameters per bloc
       title: "MLP 扩展：nn.Linear(n_embd, 4 * n_embd)",
       md: `
 **\`fc_in\` 是 MLP 的第一层。它把每个 token 的 768 维向量变成 3072 个数，每个数衡量这个 token 和某一个学到的模式有多匹配。**
+
+> 🆕 在 LLaMA、Mistral 和 DeepSeek 里，这一层叫 \`up_proj\`（LLaMA 3 8B 是 4096 → 14336）。旁边多了一个 \`gate_proj\`，由它决定这些数各能通过多少，取代了 GELU 的位置，见 [SwiGLU](#info:swiglu_notes)。
 
 ## 位置
 
@@ -189,6 +193,8 @@ read whiteboard   wide "workspace"                          write back
       title: "MLP projection back: nn.Linear(4 * n_embd, n_embd)",
       md: `
 **\`fc_out\` is the last layer of the MLP. It turns the 3072 numbers from GELU back into a 768-dimensional vector, the update that is added to the residual stream.**
+
+> 🆕 In LLaMA, Mistral and DeepSeek this layer is \`down_proj\` (14336 → 4096 in LLaMA 3 8B). It does the same job: it turns the gated hidden values back into a vector of the model width, which is added to the residual stream. See [SwiGLU](#info:swiglu_notes).
 
 ## Where it sits
 
@@ -345,6 +351,8 @@ Together with [\`fc_in\`](#info:mlp_fc_in_notes) (2,362,368), the MLP has 4,722,
       title: "MLP 投影回去：nn.Linear(4 * n_embd, n_embd)",
       md: `
 **\`fc_out\` 是 MLP 的最后一层。它把 GELU 输出的 3072 个数变回一个 768 维向量，也就是要加回残差流的那个更新。**
+
+> 🆕 在 LLaMA、Mistral 和 DeepSeek 里，这一层叫 \`down_proj\`（LLaMA 3 8B 是 14336 → 4096）。作用完全一样：把经过门控的 hidden 值变回模型宽度的向量，加回残差流。见 [SwiGLU](#info:swiglu_notes)。
 
 ## 位置
 
@@ -1850,6 +1858,19 @@ gate * up          (B, T, 14336)   element-wise product
 
 As in GPT-2, every token goes through the MLP separately. The MLP never mixes information between tokens.
 
+### What each matrix does
+
+Think of the MLP as asking many questions, then summing up the answers.
+
+- **\`up_proj\` (4096 → 14336): ask questions.** A token's 4096 numbers mix all kinds of information about it. Each of the 14336 rows of \`up_proj\` asks one question, such as "is this a place name?" or "was there a negation before this?", and gives one number for how well the token fits.
+- **\`gate_proj\` (4096 → 14336): decide how much each answer counts.** After SiLU, its numbers let some answers through and push others to nearly 0 (section 3).
+- **\`down_proj\` (14336 → 4096): sum up the answers.** Each answer that got through adds a little of its own direction back, and the total is a 4096-number update, the same width as the residual stream, so it can be added to it.
+
+### Why widen first
+
+The on/off decision is made **one number at a time**. In 4096 dimensions there would be only 4096 such switches. Widening to 14336 gives the model room to check many more patterns separately before folding the result back into 4096. The input and the output must be 4096 wide to match the residual stream, but the middle can be as wide as we like. Wider means more patterns and more stored knowledge, at the cost of more parameters and computation.
+
+These two layers do the same job as GPT-2's \`fc_in\` and \`fc_out\`. Their notes go into more detail: [MLP expansion](#info:mlp_fc_in_notes) and [MLP projection back](#info:mlp_fc_out_notes).
 ## 3. What the gate does
 
 \`gate * up\` multiplies position by position: the $i$-th number of the gate scales the $i$-th number of \`up\`. A small example with 4 numbers instead of 14336:
@@ -1988,6 +2009,19 @@ gate * up          (B, T, 14336)   逐元素相乘
 
 和 GPT-2 一样，每个 token 各自过 MLP，MLP 不会在 token 之间交换信息。
 
+### 三个矩阵各做什么
+
+可以把 MLP 想成：先问很多问题，再把答案汇总起来。
+
+- **\`up_proj\`（4096 → 14336）：提问。** 一个 token 的 4096 个数里混着它的各种信息。\`up_proj\` 的 14336 行，每一行提一个问题，比如"这是不是地名？""前面有没有否定？"，得到一个数，表示这个 token 有多符合。
+- **\`gate_proj\`（4096 → 14336）：决定每个答案算多少。** 它的输出过了 SiLU 之后，让一部分答案通过，把另一部分压到接近 0（第 3 节）。
+- **\`down_proj\`（14336 → 4096）：汇总答案。** 每个通过的答案，往回写一点它对应的方向，加起来就是一个 4096 维的更新，和残差流一样宽，才能加回去。
+
+### 为什么要先升维
+
+"放行还是挡住"是**一个数一个数**决定的。如果只在 4096 维里做，就只有 4096 个开关。升到 14336 维，模型就能先把更多模式各自分开判断，再收回 4096 维。输入和输出必须是 4096 维，才能和残差流对上，但中间可以随意加宽。中间越宽，能分辨的模式、能存的知识就越多，代价是参数和计算量也越多。
+
+这两层的作用和 GPT-2 的 \`fc_in\`、\`fc_out\` 一样，那两篇 note 讲得更细：[MLP 扩展](#info:mlp_fc_in_notes)、[MLP 投影回去](#info:mlp_fc_out_notes)。
 ## 3. gate 起什么作用
 
 \`gate * up\` 是按位置相乘：gate 的第 $i$ 个数去乘 \`up\` 的第 $i$ 个数。用 4 个数代替 14336 个举个例子：

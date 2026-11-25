@@ -225,8 +225,8 @@ export function buildCodeHtml({ component, selectedId, noteOverrides = {} }) {
   // LLaMA's block: CausalSelfAttention(...) and MLP(...) jump to their code.
   html = html.replace(/= (CausalSelfAttention)(?=\((?:<\/mark>)?n_embd=n_embd, n_head=n_head, n_kv_head)/g, '= <span data-action="select:attn_class" style="text-decoration: underline; cursor: pointer;">$1</span>');
   html = html.replace(/= (MLP)(?=\(n_embd=n_embd, hidden=hidden\))/g, '= <span data-action="select:mlp_subdiagram" style="text-decoration: underline; cursor: pointer;">$1</span>');
-  // DeepSeek's MLA: the down and up projections of k/v open the MLA note.
-  html = html.replace(/\b(kv_down|kv_up)\b/g, (m) => `<span data-action="open:mla_notes" style="text-decoration: underline; cursor: pointer;">${m}</span>`);
+  // DeepSeek's MLA: the down and up projections of q and k/v open the MLA note.
+  html = html.replace(/\b(kv_down|kv_up|q_down|q_up)\b/g, (m) => `<span data-action="open:mla_notes" style="text-decoration: underline; cursor: pointer;">${m}</span>`);
   // DeepSeek's generate.py: the absorbed weights open the MLA note, the cache class the KV cache note,
   // and the pointer in attention.py jumps to generate.py.
   html = html.replace(/\b(W_uk|W_uv|q_abs)\b/g, (m) => `<span data-action="open:mla_notes" style="text-decoration: underline; cursor: pointer;">${m}</span>`);
@@ -235,6 +235,8 @@ export function buildCodeHtml({ component, selectedId, noteOverrides = {} }) {
   // DeepSeek's block: CausalSelfAttention(C, ...), MoE(C, ...) and MLP(C, ...) jump to their code.
   html = html.replace(/= (CausalSelfAttention)(?=\(C, cfg)/g, '= <span data-action="select:attn_class" style="text-decoration: underline; cursor: pointer;">$1</span>');
   html = html.replace(/= (MoE|MLP)(?=\(C, cfg)/g, '= <span data-action="select:mlp_subdiagram" style="text-decoration: underline; cursor: pointer;">$1</span>');
+  // LLaMA's SwiGLU MLP: gate_proj, up_proj and down_proj open the SwiGLU note, which explains all three matrices.
+  html = html.replace(/\b(gate_proj|up_proj|down_proj)\b/g, (m) => `<span data-action="open:swiglu_notes" style="text-decoration: underline; cursor: pointer;">${m}</span>`);
   // LLaMA's MLP class (GPT-2 has a class with the same name, so only when the code is the gated one).
   if (component.code.includes("gate_proj")) html = html.replace(/class\s+(MLP)(?=\(nn\.Module\))/g, 'class <span data-action="open:swiglu_notes" style="text-decoration: underline; cursor: pointer;">$1</span>');
 
